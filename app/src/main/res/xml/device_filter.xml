@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- iFit FitPro motor board: VID 0x213C (8508), PID 0x0002 -->
+    <usb-device vendor-id="8508" product-id="2" />
+</resources>
