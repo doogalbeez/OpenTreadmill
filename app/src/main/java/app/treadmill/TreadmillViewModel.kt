@@ -16,7 +16,9 @@ import app.treadmill.core.TreadmillDriver
 import app.treadmill.core.Workout
 import app.treadmill.core.WorkoutRunner
 import java.util.concurrent.Executors
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -68,7 +70,12 @@ class TreadmillViewModel(app: Application) : AndroidViewModel(app) {
 
     init { connect() }
 
+    private var pollJob: Job? = null
+
     fun connect() = viewModelScope.launch {
+        pollJob?.cancel()
+        tm?.let { old -> withContext(io) { old.stop(); driver?.close() } }
+        tm = null; driver = null; sim = null
         _ui.value = _ui.value.copy(connection = "Connecting…", error = null)
         val ctx = getApplication<Application>()
         val usb = ctx.getSystemService(Context.USB_SERVICE) as UsbManager
@@ -88,7 +95,7 @@ class TreadmillViewModel(app: Application) : AndroidViewModel(app) {
             connection = if (sim != null) "Simulator" else "Connected",
             demo = sim != null, limits = tm!!.limits,
         )
-        pollLoop()
+        pollJob = pollLoop()
     }
 
     private fun demo(reason: String): TreadmillDriver {
@@ -184,8 +191,7 @@ class TreadmillViewModel(app: Application) : AndroidViewModel(app) {
 
     override fun onCleared() {
         // Never leave the belt running if the app goes away.
-        tm?.stop()
-        driver?.close()
+        runBlocking(io) { tm?.stop(); driver?.close() }
         io.close()
     }
 

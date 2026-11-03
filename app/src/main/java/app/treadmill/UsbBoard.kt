@@ -66,7 +66,7 @@ class UsbHidTransport private constructor(
                 }
                 val filter = IntentFilter(ACTION_PERMISSION)
                 if (Build.VERSION.SDK_INT >= 33) context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
-                else @Suppress("UnspecifiedRegisterReceiverFlag") context.registerReceiver(receiver, filter)
+                else context.registerReceiver(receiver, filter)
                 val flags = if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0
                 val pi = PendingIntent.getBroadcast(context, 0, Intent(ACTION_PERMISSION).setPackage(context.packageName), flags)
                 usb.requestPermission(device, pi)
