@@ -1,4 +1,4 @@
-package app.treadmill
+package app.opentreadmill
 
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
@@ -12,8 +12,8 @@ import android.hardware.usb.UsbEndpoint
 import android.hardware.usb.UsbInterface
 import android.hardware.usb.UsbManager
 import android.os.Build
-import app.treadmill.core.FitPro
-import app.treadmill.core.FrameTransport
+import app.opentreadmill.core.FitPro
+import app.opentreadmill.core.FrameTransport
 import java.io.IOException
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
@@ -48,7 +48,7 @@ class UsbHidTransport private constructor(
     companion object {
         private const val TIMEOUT_MS = 1000
         private const val READ_DELAY_MS = 80L
-        private const val ACTION_PERMISSION = "app.treadmill.USB_PERMISSION"
+        private const val ACTION_PERMISSION = "app.opentreadmill.USB_PERMISSION"
 
         fun findBoard(usb: UsbManager): UsbDevice? = usb.deviceList.values.firstOrNull {
             it.vendorId == FitPro.VENDOR_ID && it.productId == FitPro.PRODUCT_ID

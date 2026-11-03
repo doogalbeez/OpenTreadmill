@@ -19,7 +19,7 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-rootProject.name = "treadmill"
+rootProject.name = "OpenTreadmill"
 include(":core")
 // The Android app needs the Android SDK. Skip it with -PcoreOnly on machines without one.
 if (!providers.gradleProperty("coreOnly").isPresent) include(":app")

@@ -1,6 +1,6 @@
-package app.treadmill.core
+package app.opentreadmill.core
 
-import app.treadmill.core.FitPro.Mode
+import app.opentreadmill.core.FitPro.Mode
 import kotlin.test.*
 
 /** Runs a Controller against the quirky SimulatedBoard in fake time. */
@@ -28,6 +28,105 @@ class ControllerTest {
         assertEquals(Mode.PAUSE, r.board.mode, r.log.joinToString("\n"))
         // Regressions: v0.2 sent {Kph 0, Pause} and then Idle; the real board fails both.
         assertEquals(0, r.board.rejectedFrames, r.log.joinToString("\n"))
+    }
+
+    @Test fun followsTheConsoleSpeedButtons() {
+        // Regression: speed changed on the console's buttons left the app showing its own old target.
+        val r = Rig()
+        r.c.start(5.0); r.run(10.0)
+        r.board.consoleSpeed(19.0); r.run(3.0)
+        assertEquals(19.0, r.c.snap.targetKph, 0.01, r.log.joinToString("\n"))
+        r.board.consoleSpeed(1.6); r.run(3.0)
+        assertEquals(1.6, r.c.snap.targetKph, 0.01)
+        // The next tap in the app starts from the console's speed, not the app's stale one.
+        assertTrue(r.c.setSpeed(r.c.snap.goalKph + 0.5)); r.run(3.0)
+        assertEquals(2.1, r.board.read(FitPro.Field.KPH) / 100.0, 0.05)
+        assertEquals(0, r.board.rejectedFrames)
+    }
+
+    @Test fun followsTheConsoleInclineButtons() {
+        val r = Rig()
+        r.c.setIncline(2.0); r.run(3.0)
+        r.board.consoleIncline(8.0); r.run(3.0)
+        assertEquals(8.0, r.c.snap.targetIncline, 0.01, r.log.joinToString("\n"))
+    }
+
+    @Test fun stopLevelsTheDeckButPauseKeepsIt() {
+        val r = Rig()
+        r.c.start(4.0); r.c.setIncline(6.0); r.run(15.0)
+        r.c.pause(); r.run(5.0)
+        assertEquals(6.0, r.board.grade, 0.01)        // paused: incline kept for Resume
+        r.c.start(4.0); r.run(3.0)
+        r.c.stop(); r.run(15.0)
+        assertEquals(0.0, r.board.beltKph)
+        assertEquals(0.0, r.board.grade, 0.01, r.log.joinToString("\n"))
+        assertEquals(Mode.PAUSE, r.board.mode)
+        assertEquals(0, r.board.rejectedFrames)
+    }
+
+    @Test fun followsConsoleInclineEvenIfTheAppNeverSetOne() {
+        // Regression: incline changed only on the console was ignored until the app had set one itself.
+        val r = Rig()
+        r.c.start(4.0); r.run(5.0)
+        r.board.consoleIncline(6.0); r.run(3.0)
+        assertEquals(6.0, r.c.snap.targetIncline, 0.01, r.log.joinToString("\n"))
+    }
+
+    @Test fun consoleStopAndStartAreFollowed() {
+        val r = Rig()
+        r.c.start(4.0); r.run(8.0)
+        r.board.consoleStop(); r.run(2.0)
+        assertFalse(r.c.snap.wantRunning, r.log.joinToString("\n"))
+        assertEquals(Mode.PAUSE, r.board.mode)
+        r.run(5.0)
+        r.board.consoleStart(); r.run(3.0)
+        assertTrue(r.c.snap.wantRunning, r.log.joinToString("\n"))
+        assertEquals(Mode.RUNNING, r.board.mode)    // not stopped by the safety net
+    }
+
+    @Test fun safetyNetStillWinsRightAfterOurStop() {
+        val r = Rig()
+        r.c.start(4.0); r.run(8.0)
+        r.c.stop(); r.run(0.4)
+        r.board.consoleStart(); r.run(4.0)            // within 3 s of our STOP: treated as the board ignoring us
+        assertFalse(r.c.snap.wantRunning)
+        assertEquals(Mode.PAUSE, r.board.mode, r.log.joinToString("\n"))
+    }
+
+    @Test fun stepCanBeLengthenedAndShortened() {
+        val r = Rig()
+        val w = Workout("t", listOf(Segment(60, 4.0, 0.0, "a"), Segment(60, 6.0, 0.0, "b")))
+        val wr = WorkoutRunner(r.c, w)
+        wr.begin(); r.run(3.0)
+        repeat(20) { wr.tick() }                       // 20 s into step a
+        assertTrue(wr.adjustCurrentStep(60))
+        assertEquals(120, wr.workout.segments[0].seconds)
+        assertEquals(100, wr.secondsLeftInSegment())
+        wr.adjustCurrentStep(-600)                     // can't cut below 10 s from now
+        assertEquals(30, wr.workout.segments[0].seconds)
+        assertEquals(10, wr.secondsLeftInSegment())
+    }
+
+    @Test fun startsFromResults() {
+        // Regression: after ~10 min paused the real board sits in Results and refuses Running.
+        val r = Rig()
+        r.c.start(4.0); r.run(6.0)
+        r.c.stop(); r.run(6.0)
+        r.board.timeOutToResults(); r.run(1.0)
+        r.c.start(4.0); r.run(6.0)
+        assertEquals(Mode.RUNNING, r.board.mode, r.log.joinToString("\n"))
+        assertTrue(r.board.beltKph > 1.0)
+        assertEquals(0, r.board.rejectedFrames, r.log.joinToString("\n"))
+    }
+
+    @Test fun failedStartIsReportedNotFaked() {
+        val r = Rig()
+        r.board.refuseRunning = true
+        r.c.start(4.0); r.run(10.0)
+        assertFalse(r.c.snap.wantRunning, r.log.joinToString("\n"))
+        assertNotNull(r.c.snap.problem)
+        // Telemetry keeps flowing between refused frames.
+        assertTrue(r.c.snap.boardOk)
     }
 
     @Test fun startAgainAfterStop() {

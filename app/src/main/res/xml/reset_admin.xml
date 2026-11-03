@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Only the factory reset in Settings. Activated by Android's own confirmation screen, and dropped again if the reset is cancelled. -->
+<device-admin>
+    <uses-policies>
+        <wipe-data />
+    </uses-policies>
+</device-admin>

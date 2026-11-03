@@ -12,6 +12,10 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # The signing key lives in repository secrets, never in the repo (see docs/SIGNING.md).
+      KEYSTORE_B64: ${{ secrets.OPENTREADMILL_KEYSTORE_B64 }}
+      OPENTREADMILL_KEYSTORE_PASSWORD: ${{ secrets.OPENTREADMILL_KEYSTORE_PASSWORD }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-java@v5
@@ -19,22 +23,28 @@ jobs:
           distribution: temurin
           java-version: 17
       - uses: gradle/actions/setup-gradle@v4
+      - name: Signing key from secrets
+        if: env.KEYSTORE_B64 != ''
+        run: |
+          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/opentreadmill.keystore"
+          echo "OPENTREADMILL_KEYSTORE=$RUNNER_TEMP/opentreadmill.keystore" >> "$GITHUB_ENV"
       - name: Test core and build the APK
         run: ./gradlew :core:test :app:assembleDebug
       - name: Name the APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk treadmill.apk
+        run: cp app/build/outputs/apk/debug/app-debug.apk opentreadmill.apk
       - uses: actions/upload-artifact@v4
         with:
-          name: treadmill-apk
-          path: treadmill.apk
+          name: opentreadmill-apk
+          path: opentreadmill.apk
       # Every build of main becomes a release, so the newest APK is always at
-      # releases/latest/download/treadmill.apk
+      # releases/latest/download/opentreadmill.apk. Only builds signed with the real key are
+      # published: anything else couldn't update the installed app.
       - name: Publish release
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push' && env.KEYSTORE_B64 != ''
         env:
           GH_TOKEN: ${{ github.token }}
           RUN: ${{ github.run_number }}
         run: |
           TAG="v$(grep -oP 'versionName = "\K[^"]+' app/build.gradle.kts)-$RUN"
-          gh release create "$TAG" treadmill.apk --target "$GITHUB_SHA" --latest \
-            --title "Treadmill $TAG" --notes "Install treadmill.apk on the console. See docs/INSTALL.md."
+          gh release create "$TAG" opentreadmill.apk --target "$GITHUB_SHA" --latest \
+            --title "OpenTreadmill $TAG" --notes "Install opentreadmill.apk on the console. See docs/INSTALL.md."

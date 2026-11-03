@@ -5,23 +5,34 @@ plugins {
 }
 
 android {
-    namespace = "app.treadmill"
+    namespace = "app.opentreadmill"
     compileSdk = 34
     defaultConfig {
-        applicationId = "app.treadmill"
+        applicationId = "app.opentreadmill"
         minSdk = 24
         targetSdk = 34
-        versionCode = 3
-        versionName = "0.2.1"
+        versionCode = 4
+        versionName = "0.3.0"
     }
-    // A fixed key in the repo so every build can update the last one in place.
-    // It only protects updates of this sideloaded app; it is not a secret.
+    // The signing key is kept out of the repo. Builds that should install over the console's copy
+    // (yours, and CI's) point at it with these settings, from ~/.gradle/gradle.properties or the
+    // environment. Without them the build uses Android's throwaway debug key, which can't update
+    // the installed app. See docs/SIGNING.md.
+    fun setting(name: String): String? =
+        providers.gradleProperty(name).orNull ?: providers.environmentVariable(name).orNull
+    val keystore = setting("OPENTREADMILL_KEYSTORE")?.let { file(it) }?.takeIf { it.exists() }
     signingConfigs {
+        if (keystore != null) create("opentreadmill") {
+            storeFile = keystore
+            storePassword = setting("OPENTREADMILL_KEYSTORE_PASSWORD")
+            keyAlias = setting("OPENTREADMILL_KEY_ALIAS") ?: "opentreadmill"
+            keyPassword = setting("OPENTREADMILL_KEY_PASSWORD") ?: setting("OPENTREADMILL_KEYSTORE_PASSWORD")
+        }
+    }
+    buildTypes {
         getByName("debug") {
-            storeFile = file("treadmill.keystore")
-            storePassword = "treadmill"
-            keyAlias = "treadmill"
-            keyPassword = "treadmill"
+            if (keystore != null) signingConfig = signingConfigs.getByName("opentreadmill")
+            else logger.warn("OpenTreadmill: no signing key set (OPENTREADMILL_KEYSTORE); this APK can't update the installed app.")
         }
     }
     buildFeatures { compose = true }

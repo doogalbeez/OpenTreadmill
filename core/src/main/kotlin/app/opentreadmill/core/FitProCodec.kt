@@ -1,4 +1,4 @@
-package app.treadmill.core
+package app.opentreadmill.core
 
 /**
  * Frame codec for the FitPro (Gen 6) motor board protocol, spoken over USB HID

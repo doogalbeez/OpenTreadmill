@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="reset_admin_description">Used only for the factory reset in OpenTreadmill\'s Settings, after you confirm it there.</string>
+    <string name="nav_service_description">Shows Home, Back and Apps buttons over other apps, and a STOP button while the treadmill belt is moving.</string>
+</resources>

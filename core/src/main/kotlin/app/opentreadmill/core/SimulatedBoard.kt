@@ -1,7 +1,7 @@
-package app.treadmill.core
+package app.opentreadmill.core
 
-import app.treadmill.core.FitPro.Field
-import app.treadmill.core.FitPro.Mode
+import app.opentreadmill.core.FitPro.Field
+import app.opentreadmill.core.FitPro.Mode
 
 /**
  * A fake FitPro board that speaks real frames and copies the real board's quirks:
@@ -29,8 +29,19 @@ class SimulatedBoard(
     private var targetGrade = 0.0
     private var dmkBurst = 0
     private var frames = 0
-    /** Frames failed for an out-of-range Kph or Idle from Pause. The controller should never cause one. */
+    /** Frames failed for a write the real board refuses. The controller should never cause one. */
     var rejectedFrames = 0; private set
+    /** Test hook: a board that won't start at all. */
+    var refuseRunning = false
+
+    // The console's own buttons, which talk to the board without going through the app.
+    fun consoleSpeed(kph: Double) { if (mode == Mode.RUNNING) targetKph = kph.coerceIn(minKph, maxKph) }
+    fun consoleIncline(pct: Double) { targetGrade = pct.coerceIn(minGrade, maxGrade) }
+    fun consoleStart() { if (keyIn && mode in setOf(Mode.IDLE, Mode.PAUSE)) { mode = Mode.RUNNING; targetKph = minKph } }
+    fun consoleStop() { if (mode == Mode.RUNNING) { mode = Mode.PAUSE; targetKph = 0.0 } }
+
+    /** What the real board does after sitting in Pause for about ten minutes. */
+    fun timeOutToResults() { if (mode == Mode.PAUSE) mode = Mode.RESULTS }
 
     fun tick(seconds: Double) {
         val tk = if (mode == Mode.RUNNING && keyIn) targetKph else 0.0
@@ -48,6 +59,7 @@ class SimulatedBoard(
         writes[Field.KPH]?.let { if (it / 100.0 !in minKph..maxKph) { rejectedFrames++; return FitPro.response(request[0].toInt(), 4, reads.map { r -> r to 0 }) } }
         // Also like the real board: Idle from Pause, or any mode write with the key out, fails the whole frame.
         if (writes[Field.WORKOUT_MODE] == Mode.IDLE.code && mode == Mode.PAUSE ||
+            writes[Field.WORKOUT_MODE] == Mode.RUNNING.code && (mode == Mode.RESULTS || refuseRunning) ||
             Field.WORKOUT_MODE in writes && mode == Mode.SAFETY_KEY_OUT) { rejectedFrames++; return FitPro.response(request[0].toInt(), 4, reads.map { r -> r to 0 }) }
         for ((f, v) in writes) when (f) {
             Field.KPH -> if (mode == Mode.RUNNING) targetKph = v / 100.0
@@ -64,14 +76,14 @@ class SimulatedBoard(
     private fun applyMode(m: Mode) {
         if (!keyIn) return
         when (m) {
-            Mode.RUNNING -> if (mode in setOf(Mode.IDLE, Mode.PAUSE, Mode.RESULTS)) mode = Mode.RUNNING
+            Mode.RUNNING -> if (mode in setOf(Mode.IDLE, Mode.PAUSE)) mode = Mode.RUNNING
             Mode.PAUSE -> if (mode == Mode.RUNNING) { mode = Mode.PAUSE; targetKph = 0.0 }
             Mode.IDLE -> if (mode != Mode.RUNNING) { mode = Mode.IDLE; targetKph = 0.0 }  // ignored while running
             else -> {}
         }
     }
 
-    private fun read(f: Field): Int = when (f) {
+    fun read(f: Field): Int = when (f) {
         Field.KPH -> (targetKph * 100).toInt()
         Field.GRADE -> (targetGrade * 100).toInt()
         Field.DISTANCE -> odometerM.toInt()

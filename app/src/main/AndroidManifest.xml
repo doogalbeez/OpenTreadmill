@@ -4,8 +4,8 @@
     <uses-feature android:name="android.hardware.usb.host" android:required="false" />
 
     <application
-        android:label="Treadmill"
-        android:theme="@style/Theme.Treadmill"
+        android:label="OpenTreadmill"
+        android:theme="@style/Theme.OpenTreadmill"
         android:supportsRtl="true">
 
         <activity
@@ -32,5 +32,54 @@
                 android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
                 android:resource="@xml/device_filter" />
         </activity>
+
+        <!-- Lets the app read Spotify's song and play state for the music controls. -->
+        <service
+            android:name=".MediaListener"
+            android:label="OpenTreadmill music controls"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
+        <!-- Floating Home / Back / Apps over other apps, plus STOP while the belt moves. -->
+        <service
+            android:name=".NavService"
+            android:label="OpenTreadmill navigation buttons"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/nav_service" />
+        </service>
+
+        <!-- Factory reset from Settings. Android asks before it is activated; nothing else uses it. -->
+        <receiver
+            android:name=".ResetAdmin"
+            android:label="OpenTreadmill factory reset"
+            android:description="@string/reset_admin_description"
+            android:permission="android.permission.BIND_DEVICE_ADMIN"
+            android:exported="true">
+            <meta-data
+                android:name="android.app.device_admin"
+                android:resource="@xml/reset_admin" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+            </intent-filter>
+        </receiver>
     </application>
+
+    <!-- Android 11+ hides other apps unless they are declared: Spotify, and launchable apps for the Apps list. -->
+    <queries>
+        <package android:name="com.spotify.music" />
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
 </manifest>
