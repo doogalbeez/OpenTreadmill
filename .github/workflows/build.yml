@@ -3,7 +3,6 @@ name: Build
 on:
   push:
     branches: ["**"]
-    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -28,9 +27,13 @@ jobs:
         with:
           name: treadmill-apk
           path: treadmill.apk
-      # Tagging vX.Y.Z publishes a release with a direct .apk download.
+      # Every build of main becomes a release, so the newest APK is always at
+      # releases/latest/download/treadmill.apk
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" treadmill.apk --title "Treadmill $GITHUB_REF_NAME" --notes "Install treadmill.apk on the console. See docs/INSTALL.md."
+          TAG: v0.1.${{ github.run_number }}
+        run: |
+          gh release create "$TAG" treadmill.apk --target "$GITHUB_SHA" --latest \
+            --title "Treadmill $TAG" --notes "Install treadmill.apk on the console. See docs/INSTALL.md."
