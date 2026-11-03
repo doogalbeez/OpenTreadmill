@@ -12,10 +12,11 @@ data class Workout(val name: String, val segments: List<Segment>) {
     }
 }
 
-/** Drives a SafeTreadmill through a workout. Call [tick] about once a second. */
-class WorkoutRunner(private val tm: SafeTreadmill, val workout: Workout) {
+/** Drives a [Controller] through a workout. Call [tick] once per second of running. */
+class WorkoutRunner(private val tm: Controller, val workout: Workout) {
     var elapsed = 0; private set
     var finished = false; private set
+
     fun currentIndex(): Int {
         var t = elapsed
         workout.segments.forEachIndexed { i, s -> if (t < s.seconds) return i; t -= s.seconds }
@@ -28,17 +29,20 @@ class WorkoutRunner(private val tm: SafeTreadmill, val workout: Workout) {
         return 0
     }
 
+    /** Begin: starts the belt toward the first segment. */
+    fun begin() {
+        val s = workout.segments.firstOrNull() ?: return
+        tm.start(s.kph)
+        tm.setIncline(s.inclinePct)
+    }
+
     fun tick(seconds: Int = 1) {
         if (finished) return
+        elapsed += seconds
         val i = currentIndex()
         if (i >= workout.segments.size) { finished = true; tm.stop(); return }
         val s = workout.segments[i]
-        if (!tm.running && elapsed == 0) tm.start(s.kph)
-        // Re-issue each tick until reached: SafeTreadmill may step or rate-limit changes.
-        val wantKph = s.kph.coerceIn(tm.limits.minKph, tm.limits.maxKph)
-        val wantGrade = s.inclinePct.coerceIn(tm.limits.minGrade, tm.limits.maxGrade)
-        if (tm.targetKph != wantKph) tm.setSpeed(wantKph)
-        if (tm.targetGrade != wantGrade) tm.setIncline(wantGrade)
-        elapsed += seconds
+        tm.setSpeed(s.kph)
+        if (tm.snap.targetIncline != s.inclinePct.coerceIn(tm.limits.minGrade, tm.limits.maxGrade)) tm.setIncline(s.inclinePct)
     }
 }

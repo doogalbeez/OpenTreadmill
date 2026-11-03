@@ -22,7 +22,7 @@ object Stats {
     }
 }
 
-/** Accumulates time, distance and calories from polled speed and incline. */
+/** Accumulates time and calories from polled speed and incline; distance comes from the board's odometer. */
 class SessionStats(private val kg: () -> Double) {
     var seconds = 0.0; private set
     var meters = 0.0; private set
@@ -32,10 +32,11 @@ class SessionStats(private val kg: () -> Double) {
     fun add(dtSeconds: Double, kph: Double, gradePct: Double) {
         if (kph <= 0.0) return
         seconds += dtSeconds
-        meters += kph / 3.6 * dtSeconds
         kcal += Stats.kcalPerMinute(kph, gradePct, kg()) * dtSeconds / 60.0
         maxKph = maxOf(maxKph, kph)
     }
+
+    fun addMeters(m: Double) { if (m > 0 && m < 50) meters += m }  // ignore odometer resets/jumps
 
     val avgKph get() = if (seconds > 0) meters / seconds * 3.6 else 0.0
 

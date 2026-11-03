@@ -49,7 +49,14 @@ object FitPro {
         }
     }
 
+    /** Response status byte. Only DONE carries real data; anything else fills the fields with 0xFF. */
+    const val STATUS_DONE = 2
     const val STATUS_SECURITY_BLOCK = 8
+
+    fun statusName(v: Int) = when (v) {
+        0 -> "devNotSupported"; 1 -> "cmdNotSupported"; 2 -> "done"; 3 -> "inProgress"; 4 -> "failed"
+        5 -> "timeLeft"; 7 -> "unknownFailure"; 8 -> "securityBlock"; 9 -> "commFailed"; else -> "status$v"
+    }
 
     fun checksum(bytes: ByteArray, until: Int): Byte {
         var sum = 0
@@ -102,7 +109,9 @@ object FitPro {
         return out
     }
 
-    class Response(val device: Int, val command: Int, val status: Int, val values: Map<Field, Int>)
+    class Response(val device: Int, val command: Int, val status: Int, val values: Map<Field, Int>) {
+        val ok get() = status == STATUS_DONE
+    }
 
     class ProtocolException(msg: String) : Exception(msg)
 
@@ -114,6 +123,7 @@ object FitPro {
         if (checksum(bytes, len - 1) != bytes[len - 1]) throw ProtocolException("Checksum mismatch")
         val status = bytes[3].toInt() and 0xFF
         val values = linkedMapOf<Field, Int>()
+        if (status != STATUS_DONE) return Response(bytes[0].toInt() and 0xFF, bytes[2].toInt() and 0xFF, status, values)
         var pos = 4
         for (f in reads.sortedBy { it.id }) {
             if (pos + f.size > len - 1) throw ProtocolException("Response too short for ${f.name}")
@@ -125,4 +135,47 @@ object FitPro {
         }
         return Response(bytes[0].toInt() and 0xFF, bytes[2].toInt() and 0xFF, status, values)
     }
+
+    /** Parse a ReadWriteData request back into its writes and reads (used by the simulator). */
+    fun parseRequest(bytes: ByteArray): Pair<Map<Field, Int>, List<Field>> {
+        val len = bytes[1].toInt() and 0xFF
+        var pos = 3
+        fun section(): List<Field> {
+            val groups = bytes[pos++].toInt() and 0xFF
+            val out = mutableListOf<Field>()
+            for (g in 0 until groups) {
+                val m = bytes[pos++].toInt() and 0xFF
+                for (b in 0 until 8) if (m and (1 shl b) != 0) {
+                    out += Field.of(g * 8 + b) ?: throw ProtocolException("Unknown field ${g * 8 + b}")
+                }
+            }
+            return out.sortedBy { it.id }
+        }
+        val writeFields = section()
+        val writes = linkedMapOf<Field, Int>()
+        for (f in writeFields) {
+            var v = 0
+            for (i in 0 until f.size) v = v or ((bytes[pos + i].toInt() and 0xFF) shl (8 * i))
+            if (f.signed && f.size == 2) v = v.toShort().toInt()
+            writes[f] = v; pos += f.size
+        }
+        val reads = section()
+        if (pos != len - 1) throw ProtocolException("Trailing bytes in request")
+        return writes to reads
+    }
+
+    /** Build a response frame (used by the simulator). */
+    fun response(device: Int, status: Int, values: List<Pair<Field, Int>>): ByteArray {
+        val body = ArrayList<Byte>()
+        body += status.toByte()
+        for ((f, v) in values) for (i in 0 until f.size) body += ((if (status == STATUS_DONE) v shr (8 * i) else 0xFF) and 0xFF).toByte()
+        val len = 3 + body.size + 1
+        val out = ByteArray(len)
+        out[0] = device.toByte(); out[1] = len.toByte(); out[2] = CMD_READ_WRITE_DATA.toByte()
+        body.toByteArray().copyInto(out, 3)
+        out[len - 1] = checksum(out, len - 1)
+        return out
+    }
+
+    fun hex(b: ByteArray) = b.joinToString(" ") { "%02X".format(it) }
 }

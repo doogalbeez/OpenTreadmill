@@ -50,3 +50,12 @@ permission for the motor board, tick **Use by default** and allow it.
 
 If something looks wrong, pull the safety key. Send Claude a photo of the screen with any
 error message.
+
+## Updating
+
+Newer builds install over the old one, so settings and history are kept. The one exception is
+moving from v0.1.x to v0.2: uninstall the old Treadmill app first, because v0.1 was signed with a
+different key.
+
+The newest build is always at `github.com/doogalbeez/treadmill/releases/latest/download/treadmill.apk`
+(the repo must be public, or you must be signed in, for that link to work).

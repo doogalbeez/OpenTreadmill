@@ -59,11 +59,12 @@ private fun Console(s: UiState, vm: TreadmillViewModel) {
         Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
             // Speed column
             ControlColumn(
-                title = "Speed", value = fmtSpeed(s.kph, miles), unit = speedUnit(miles),
-                target = "target ${fmtSpeed(s.targetKph, miles)}",
+                title = "Speed", value = fmtSpeed(if (s.running) s.board.targetKph else s.board.beltKph, miles), unit = speedUnit(miles),
+                target = "belt ${fmtSpeed(s.board.beltKph, miles)}" +
+                    if (s.running && s.board.goalKph != s.board.targetKph) " · going to ${fmtSpeed(s.board.goalKph, miles)}" else "",
                 step = if (miles) 0.1 * Stats.KPH_PER_MPH else 0.1, presets = if (miles) listOf(2.0, 3.0, 4.0, 5.0, 6.0, 7.0) else listOf(3.0, 5.0, 6.0, 8.0, 10.0, 12.0),
                 presetToKph = { if (miles) it * Stats.KPH_PER_MPH else it },
-                onBy = vm::speedBy, onTo = vm::speedTo, enabled = s.running && s.safetyKeyIn,
+                onBy = vm::speedBy, onTo = vm::speedTo, enabled = s.running && !s.keyOut,
                 modifier = Modifier.weight(1f),
             )
             // Centre: stats and start/stop
@@ -74,10 +75,10 @@ private fun Console(s: UiState, vm: TreadmillViewModel) {
                 MainButtons(s, vm)
             }
             ControlColumn(
-                title = "Incline", value = "%.1f".format(s.incline), unit = "%",
-                target = "target %.1f".format(s.targetIncline),
+                title = "Incline", value = "%.1f".format(s.board.incline), unit = "%",
+                target = "target %.1f".format(s.board.targetIncline),
                 step = 0.5, presets = listOf(0.0, 2.0, 4.0, 6.0, 8.0, 10.0), presetToKph = { it },
-                onBy = vm::inclineBy, onTo = vm::inclineTo, enabled = s.safetyKeyIn,
+                onBy = vm::inclineBy, onTo = vm::inclineTo, enabled = !s.keyOut,
                 modifier = Modifier.weight(1f),
             )
             SidePanel(s, vm, Modifier.weight(1.2f))
@@ -91,7 +92,8 @@ private fun StatusBar(s: UiState, vm: TreadmillViewModel) {
         Text("Treadmill", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Color.White)
         Spacer(Modifier.width(16.dp))
         Text(s.connection + " · " + s.mode.name.lowercase().replace('_', ' '), color = if (s.demo) Color(0xFFF5A623) else Muted)
-        if (!s.safetyKeyIn) { Spacer(Modifier.width(16.dp)); Text("SAFETY KEY OUT", color = StopRed, fontWeight = FontWeight.Bold) }
+        if (s.keyOut) { Spacer(Modifier.width(16.dp)); Text("SAFETY KEY OUT: put it back, then press Start", color = StopRed, fontWeight = FontWeight.Bold) }
+        if (s.board.stopping) { Spacer(Modifier.width(16.dp)); Text("Stopping…", color = StopRed, fontWeight = FontWeight.Bold) }
         Spacer(Modifier.weight(1f))
         s.error?.let { Text(it, color = Color(0xFFF5A623), modifier = Modifier.padding(end = 12.dp)) }
         if (s.demo) TextButton(onClick = vm::connect) { Text("Retry USB") }
@@ -133,7 +135,7 @@ private fun BigButton(label: String, enabled: Boolean, onClick: () -> Unit) {
 @Composable
 private fun StatGrid(s: UiState) {
     val miles = s.useMiles
-    val pace = Stats.paceSeconds(s.kph, miles)?.let { fmtTime(it) } ?: "--"
+    val pace = Stats.paceSeconds(s.board.beltKph, miles)?.let { fmtTime(it) } ?: "--"
     val tiles = listOf(
         "Time" to fmtTime(s.seconds),
         "Distance (${distanceUnit(miles)})" to fmtDistance(s.meters, miles),
@@ -178,7 +180,7 @@ private fun MainButtons(s: UiState, vm: TreadmillViewModel) {
         if (s.running) {
             Button(onClick = vm::pause, modifier = Modifier.weight(1f).height(96.dp), shape = RoundedCornerShape(16.dp)) { Text("Pause", fontSize = 28.sp) }
         } else {
-            Button(onClick = vm::start, enabled = s.safetyKeyIn, modifier = Modifier.weight(1f).height(96.dp), shape = RoundedCornerShape(16.dp)) {
+            Button(onClick = vm::start, modifier = Modifier.weight(1f).height(96.dp), shape = RoundedCornerShape(16.dp)) {
                 Text(if (s.paused) "Resume" else "Start", fontSize = 28.sp)
             }
         }
@@ -211,7 +213,7 @@ private fun WorkoutsTab(s: UiState, vm: TreadmillViewModel) {
     var rounds by remember { mutableIntStateOf(6) }
     var workSec by remember { mutableIntStateOf(60) }
     LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        items(WorkoutLibrary.builtIn()) { w -> WorkoutRow(w, enabled = s.safetyKeyIn && s.workout == null) { vm.startWorkout(w) } }
+        items(WorkoutLibrary.builtIn()) { w -> WorkoutRow(w, enabled = s.workout == null) { vm.startWorkout(w) } }
         item {
             Column(Modifier.fillMaxWidth().padding(top = 8.dp)) {
                 Text("Build intervals (mph)", color = Color.White, fontWeight = FontWeight.Bold)
@@ -220,7 +222,7 @@ private fun WorkoutsTab(s: UiState, vm: TreadmillViewModel) {
                 Stepper("Work length", "${workSec}s", { workSec = (workSec - 15).coerceAtLeast(15) }, { workSec = (workSec + 15).coerceAtMost(600) })
                 Stepper("Rounds", "$rounds", { rounds = (rounds - 1).coerceAtLeast(1) }, { rounds = (rounds + 1).coerceAtMost(30) })
                 Button(onClick = { vm.startWorkout(WorkoutLibrary.customIntervals(work, rest, workSec, 90, rounds, 1.0)) },
-                    enabled = s.safetyKeyIn && s.workout == null, modifier = Modifier.fillMaxWidth()) { Text("Start custom intervals") }
+                    enabled = s.workout == null, modifier = Modifier.fillMaxWidth()) { Text("Start custom intervals") }
             }
         }
     }
@@ -284,8 +286,16 @@ private fun SettingsTab(s: UiState, vm: TreadmillViewModel) {
             Text("Simulator", color = Color.White, fontWeight = FontWeight.Bold)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("Safety key inserted", color = Muted, modifier = Modifier.weight(1f))
-                Switch(checked = s.safetyKeyIn, onCheckedChange = vm::simulateSafetyKey)
+                Switch(checked = !s.keyOut, onCheckedChange = vm::simulateSafetyKey)
             }
+        }
+        Text("Board details", color = Color.White, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 8.dp))
+        val b = s.board
+        Text("mode ${b.mode.name.lowercase()} · reply ${b.lastStatus} · refused ${b.rejects} · odometer ${b.odometerM} m",
+            color = Muted, fontSize = 12.sp)
+        Text("If something goes wrong, take a photo of this panel.", color = Muted, fontSize = 12.sp)
+        LazyColumn(Modifier.fillMaxWidth().heightIn(max = 400.dp)) {
+            items(s.log) { Text(it, color = Muted, fontSize = 11.sp) }
         }
     }
 }

@@ -5,37 +5,35 @@ import android.content.Context
 import android.hardware.usb.UsbManager
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import app.treadmill.core.Controller
 import app.treadmill.core.FitPro
-import app.treadmill.core.FitProDriver
+import app.treadmill.core.FrameTransport
 import app.treadmill.core.Limits
-import app.treadmill.core.SafeTreadmill
 import app.treadmill.core.SessionStats
-import app.treadmill.core.SimulatedTreadmill
+import app.treadmill.core.SimulatedBoard
+import app.treadmill.core.Snapshot
 import app.treadmill.core.Stats
-import app.treadmill.core.TreadmillDriver
 import app.treadmill.core.Workout
 import app.treadmill.core.WorkoutRunner
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import java.util.concurrent.Executors
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.asCoroutineDispatcher
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 
 data class UiState(
     val connection: String = "Connecting…",
     val demo: Boolean = false,
     val error: String? = null,
-    val mode: FitPro.Mode = FitPro.Mode.UNKNOWN,
-    val safetyKeyIn: Boolean = true,
-    val kph: Double = 0.0,
-    val targetKph: Double = 0.0,
-    val incline: Double = 0.0,
-    val targetIncline: Double = 0.0,
+    val board: Snapshot = Snapshot(),
     val seconds: Int = 0,
     val meters: Double = 0.0,
     val kcal: Double = 0.0,
@@ -46,13 +44,16 @@ data class UiState(
     val workoutElapsed: Int = 0,
     val useMiles: Boolean = true,
     val weightKg: Double = 80.0,
+    val log: List<String> = emptyList(),
 ) {
-    val running get() = mode == FitPro.Mode.RUNNING
-    val paused get() = mode == FitPro.Mode.PAUSE
+    val mode get() = board.mode
+    val running get() = board.wantRunning
+    val paused get() = !board.wantRunning && board.mode == FitPro.Mode.PAUSE
+    val keyOut get() = board.keyOut
 }
 
 class TreadmillViewModel(app: Application) : AndroidViewModel(app) {
-    /** Every driver call runs on this one thread, in order. */
+    /** Every board call runs on this one thread, in order. */
     private val io = Executors.newSingleThreadExecutor { Thread(it, "treadmill-io") }.asCoroutineDispatcher()
     private val settings = Settings(app)
     val history = HistoryStore(app)
@@ -60,116 +61,127 @@ class TreadmillViewModel(app: Application) : AndroidViewModel(app) {
     private val _ui = MutableStateFlow(UiState(useMiles = settings.useMiles, weightKg = settings.weightKg))
     val ui: StateFlow<UiState> = _ui
 
-    private var driver: TreadmillDriver? = null
-    private var sim: SimulatedTreadmill? = null
-    private var tm: SafeTreadmill? = null
+    private var controller: Controller? = null
+    private var sim: SimulatedBoard? = null
+    private var pollJob: Job? = null
     private val session = SessionStats { settings.weightKg }
     private var runner: WorkoutRunner? = null
     private var sessionStart = 0L
     private var resumeKph = 0.0
+    private var lastOdo = -1
+
+    private val logLines = ArrayDeque<String>()
+    private val timeFmt = SimpleDateFormat("HH:mm:ss", Locale.US)
+    private fun log(line: String) {
+        synchronized(logLines) {
+            logLines.addLast("${timeFmt.format(Date())} $line")
+            while (logLines.size > 40) logLines.removeFirst()
+        }
+    }
 
     init { connect() }
 
-    private var pollJob: Job? = null
-
     fun connect() = viewModelScope.launch {
         pollJob?.cancel()
-        tm?.let { old -> withContext(io) { old.stop(); driver?.close() } }
-        tm = null; driver = null; sim = null
+        controller?.let { old -> withContext(io) { old.stop(); repeat(3) { runCatching { old.tick() } }; old.close() } }
+        controller = null; sim = null
         _ui.value = _ui.value.copy(connection = "Connecting…", error = null)
         val ctx = getApplication<Application>()
         val usb = ctx.getSystemService(Context.USB_SERVICE) as UsbManager
         val device = UsbHidTransport.findBoard(usb)
-        val d: TreadmillDriver = try {
+        val transport: FrameTransport = try {
             when {
                 device == null -> demo("Motor board not found, running the simulator")
                 !UsbHidTransport.ensurePermission(ctx, usb, device) -> demo("USB permission was declined, running the simulator")
-                else -> withContext(io) { FitProDriver(UsbHidTransport.open(usb, device)) }
+                else -> withContext(io) { UsbHidTransport.open(usb, device) }
             }
         } catch (e: Exception) {
             demo(e.message ?: "Could not open the motor board")
         }
-        driver = d
-        tm = withContext(io) { SafeTreadmill(d, onFault = ::fault) }
-        _ui.value = _ui.value.copy(
-            connection = if (sim != null) "Simulator" else "Connected",
-            demo = sim != null, limits = tm!!.limits,
-        )
-        pollJob = pollLoop()
+        val c = Controller(transport, log = ::log)
+        withContext(io) { c.connect() }
+        controller = c
+        _ui.value = _ui.value.copy(connection = if (sim != null) "Simulator" else "Connected", demo = sim != null, limits = c.limits)
+        pollJob = pollLoop(c)
     }
 
-    private fun demo(reason: String): TreadmillDriver {
+    private fun demo(reason: String): FrameTransport {
         _ui.value = _ui.value.copy(error = reason)
-        return SimulatedTreadmill().also { sim = it }
+        log(reason)
+        return SimulatedBoard().also { sim = it }
     }
 
-    private fun fault(e: Throwable) {
-        runner = null
-        _ui.value = _ui.value.copy(error = "Stopped for safety: ${e.message}", workout = null)
-    }
-
-    private fun pollLoop() = viewModelScope.launch {
+    private fun pollLoop(c: Controller) = viewModelScope.launch {
         var last = System.nanoTime()
         var workoutAcc = 0.0
         while (isActive) {
-            val t = tm ?: break
             val now = System.nanoTime()
             val dt = (now - last) / 1e9; last = now
-            val s = withContext(io) {
-                sim?.tick(dt)
-                val st = t.poll()
-                if (st.mode == FitPro.Mode.SLEEP) t.wake()
-                st
+            val s = withContext(io) { sim?.tick(dt); c.tick() }
+
+            // Distance straight from the board's odometer while a session is on.
+            if (s.boardOk) {
+                if (lastOdo >= 0 && s.odometerM >= lastOdo && sessionStart != 0L) {
+                    session.addMeters((s.odometerM - lastOdo).toDouble())
+                }
+                lastOdo = s.odometerM
             }
-            session.add(dt, s.speedKph, s.inclinePct)
+            if (sessionStart != 0L && (s.wantRunning || s.beltKph > 0.3)) session.add(dt, s.beltKph, s.incline)
+
             runner?.let { r ->
-                workoutAcc += dt
-                while (workoutAcc >= 1.0 && s.mode == FitPro.Mode.RUNNING) { withContext(io) { r.tick() }; workoutAcc -= 1.0 }
+                if (s.mode == FitPro.Mode.RUNNING && s.wantRunning) {
+                    workoutAcc += dt
+                    while (workoutAcc >= 1.0) { withContext(io) { r.tick() }; workoutAcc -= 1.0 }
+                }
                 if (r.finished) finishSession()
             }
+            if (s.keyOut && runner != null) { runner = null; _ui.value = _ui.value.copy(workout = null) }
+
             val r = runner
             _ui.value = _ui.value.copy(
-                mode = s.mode, safetyKeyIn = s.safetyKeyIn, kph = s.speedKph, incline = s.inclinePct,
-                targetKph = t.targetKph, targetIncline = t.targetGrade,
+                board = s,
+                error = if (!s.boardOk && sim == null) "Board not answering (${s.lastStatus})" else _ui.value.error.takeUnless { it?.startsWith("Board not") == true },
                 seconds = session.seconds.toInt(), meters = session.meters, kcal = session.kcal,
                 segmentIndex = r?.currentIndex() ?: 0, segmentSecondsLeft = r?.secondsLeftInSegment() ?: 0,
                 workoutElapsed = r?.elapsed ?: 0,
+                log = synchronized(logLines) { logLines.toList().asReversed() },
             )
-            delay(500)
+            delay(200)
         }
     }
 
-    private fun onIo(block: SafeTreadmill.() -> Unit) = viewModelScope.launch {
-        val t = tm ?: return@launch
-        try { withContext(io) { t.block() } } catch (e: IllegalStateException) {
-            _ui.value = _ui.value.copy(error = e.message)
-        }
+    private fun onIo(block: Controller.() -> Unit) = viewModelScope.launch {
+        val c = controller ?: return@launch
+        withContext(io) { c.block() }
     }
 
     fun start() {
         if (sessionStart == 0L) { session.reset(); sessionStart = System.currentTimeMillis() }
-        val kph = if (resumeKph > 0) resumeKph else _ui.value.limits.minKph.coerceAtLeast(1.6)
+        val kph = if (resumeKph > 0) resumeKph else _ui.value.limits.minKph
         _ui.value = _ui.value.copy(error = null)
         onIo { start(kph) }
     }
 
-    fun pause() { resumeKph = tm?.targetKph ?: 0.0; onIo { pause() } }
+    fun pause() { resumeKph = _ui.value.board.goalKph; onIo { pause() } }
 
+    /** STOP: always goes straight to the board thread, never blocked by anything else. */
     fun stop() {
-        viewModelScope.launch { tm?.let { t -> withContext(io) { t.stop() } }; finishSession() }
+        onIo { stop() }
+        finishSession()
     }
 
-    fun speedBy(deltaKph: Double) = onIo { setSpeed(targetKph + deltaKph) }
+    fun speedBy(deltaKph: Double) = onIo { setSpeed(snap.goalKph + deltaKph) }
     fun speedTo(kph: Double) = onIo { setSpeed(kph) }
-    fun inclineBy(delta: Double) = onIo { setIncline(targetGrade + delta) }
+    fun inclineBy(delta: Double) = onIo { setIncline(snap.targetIncline + delta) }
     fun inclineTo(pct: Double) = onIo { setIncline(pct) }
 
     fun startWorkout(w: Workout) {
-        val t = tm ?: return
+        val c = controller ?: return
         session.reset(); sessionStart = System.currentTimeMillis(); resumeKph = 0.0
-        runner = WorkoutRunner(t, w)
+        val r = WorkoutRunner(c, w)
+        runner = r
         _ui.value = _ui.value.copy(workout = w, error = null)
-        onIo { runner?.tick(0) }
+        onIo { r.begin() }
     }
 
     fun endWorkout() { runner = null; _ui.value = _ui.value.copy(workout = null) }
@@ -187,11 +199,11 @@ class TreadmillViewModel(app: Application) : AndroidViewModel(app) {
     fun setUseMiles(v: Boolean) { settings.useMiles = v; _ui.value = _ui.value.copy(useMiles = v) }
     fun setWeightKg(v: Double) { settings.weightKg = v; _ui.value = _ui.value.copy(weightKg = v) }
 
-    fun simulateSafetyKey(inserted: Boolean) { sim?.safetyKeyIn = inserted }
+    fun simulateSafetyKey(inserted: Boolean) { viewModelScope.launch(io) { sim?.keyIn = inserted } }
 
     override fun onCleared() {
         // Never leave the belt running if the app goes away.
-        runBlocking(io) { tm?.stop(); driver?.close() }
+        runBlocking(io) { controller?.let { c -> c.stop(); repeat(5) { runCatching { c.tick() } }; c.close() } }
         io.close()
     }
 
