@@ -11,8 +11,8 @@ android {
         applicationId = "app.treadmill"
         minSdk = 24
         targetSdk = 34
-        versionCode = 2
-        versionName = "0.2.0"
+        versionCode = 3
+        versionName = "0.2.1"
     }
     // A fixed key in the repo so every build can update the last one in place.
     // It only protects updates of this sideloaded app; it is not a secret.

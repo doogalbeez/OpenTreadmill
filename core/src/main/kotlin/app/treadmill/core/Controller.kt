@@ -63,7 +63,6 @@ class Controller(
     private var targetKph = 0.0
     private var targetGrade = 0.0
     private var keyLatched = false
-    private var idleWhenStill = false
     private var lastTick = 0L
     private var lastNetAt = 0L
     private var lastWakeAt = 0L
@@ -93,7 +92,7 @@ class Controller(
 
     fun start(kph: Double = limits.minKph) {
         keyLatched = false            // the person says the key is back; the board will tell us if not
-        wantRunning = true; idleWhenStill = false
+        wantRunning = true
         goalKph = clampKph(kph)
         targetKph = clampKph(minOf(goalKph, startKphCap))
         queue.clear()
@@ -119,14 +118,16 @@ class Controller(
     fun pause() {
         wantRunning = false; goalKph = 0.0; targetKph = 0.0
         queue.clear()
-        queue += mapOf(Field.KPH to 0, Field.WORKOUT_MODE to Mode.PAUSE.code)
+        queue += STOP_FRAME
         log("pause")
     }
 
-    /** Belt to a halt, then back to Idle once it is still. */
+    /**
+     * Belt to a halt. The board then stays in Pause: the real board refuses Idle from Pause,
+     * and Start works from Pause, so there is nothing more to send.
+     */
     fun stop() {
         pause()
-        idleWhenStill = true
         log("stop")
     }
 
@@ -200,15 +201,12 @@ class Controller(
     private fun safetyNet(now: Long) {
         val moving = beltMoving()
         // We want it stopped but it is moving: keep telling it, about once a second.
-        if (!wantRunning && moving && queue.isEmpty() && now - lastNetAt > 1000) {
+        // Not while the key is out: the key has already cut the motor, and the board refuses
+        // every mode write in that state.
+        if (!wantRunning && moving && mode != Mode.SAFETY_KEY_OUT && queue.isEmpty() && now - lastNetAt > 1000) {
             lastNetAt = now
             log("belt moving while stopped — sending stop again")
-            queue += mapOf(Field.KPH to 0, Field.WORKOUT_MODE to Mode.PAUSE.code)
-        }
-        // Still and paused after a STOP: back to Idle.
-        if (idleWhenStill && !moving && mode == Mode.PAUSE && queue.isEmpty() && odoStillFor(now) >= 2000) {
-            idleWhenStill = false
-            queue += mapOf(Field.WORKOUT_MODE to Mode.IDLE.code)
+            queue += STOP_FRAME
         }
         // The board sleeps on its own timer; Idle wakes it.
         if (mode == Mode.SLEEP && queue.isEmpty() && now - lastWakeAt > 5000) {
@@ -217,12 +215,6 @@ class Controller(
         }
     }
 
-    private fun odoStillFor(now: Long): Long {
-        if (odo.isEmpty()) return 0
-        val latest = odo.last().second
-        val firstSame = odo.firstOrNull { it.second == latest } ?: return 0
-        return now - firstSame.first
-    }
 
     private fun ramp(dt: Double) {
         if (!wantRunning || mode != Mode.RUNNING || dt <= 0) return
@@ -245,6 +237,11 @@ class Controller(
 
     companion object {
         val READS = listOf(Field.DISTANCE, Field.WORKOUT_MODE, Field.ACTUAL_KPH, Field.ACTUAL_INCLINE)
+        /**
+         * Pause on its own. The real board fails the whole frame if it carries Kph 0 (below its
+         * minimum speed), so v0.2's {Kph 0, Pause} was refused every time and never stopped the belt.
+         */
+        val STOP_FRAME = mapOf(Field.WORKOUT_MODE to Mode.PAUSE.code)
         const val MAX_TRIES = 15
         const val STOPPED_KPH = 0.3
         const val ODO_WINDOW_MS = 4000L

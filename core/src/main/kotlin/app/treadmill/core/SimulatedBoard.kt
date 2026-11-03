@@ -29,6 +29,8 @@ class SimulatedBoard(
     private var targetGrade = 0.0
     private var dmkBurst = 0
     private var frames = 0
+    /** Frames failed for an out-of-range Kph or Idle from Pause. The controller should never cause one. */
+    var rejectedFrames = 0; private set
 
     fun tick(seconds: Double) {
         val tk = if (mode == Mode.RUNNING && keyIn) targetKph else 0.0
@@ -42,8 +44,13 @@ class SimulatedBoard(
         frames++
         val (writes, reads) = FitPro.parseRequest(request)
         if (rejectEvery > 0 && frames % rejectEvery == 0) return FitPro.response(request[0].toInt(), 4, reads.map { it to 0 })
+        // Like the real board: a Kph outside its limits (Kph 0 included) fails the whole frame.
+        writes[Field.KPH]?.let { if (it / 100.0 !in minKph..maxKph) { rejectedFrames++; return FitPro.response(request[0].toInt(), 4, reads.map { r -> r to 0 }) } }
+        // Also like the real board: Idle from Pause, or any mode write with the key out, fails the whole frame.
+        if (writes[Field.WORKOUT_MODE] == Mode.IDLE.code && mode == Mode.PAUSE ||
+            Field.WORKOUT_MODE in writes && mode == Mode.SAFETY_KEY_OUT) { rejectedFrames++; return FitPro.response(request[0].toInt(), 4, reads.map { r -> r to 0 }) }
         for ((f, v) in writes) when (f) {
-            Field.KPH -> if (mode == Mode.RUNNING) targetKph = (v / 100.0).let { if (it <= 0.0) 0.0 else it.coerceIn(minKph, maxKph) }
+            Field.KPH -> if (mode == Mode.RUNNING) targetKph = v / 100.0
             Field.GRADE -> targetGrade = (v / 100.0).coerceIn(minGrade, maxGrade)
             Field.WORKOUT_MODE -> applyMode(Mode.of(v))
             else -> {}

@@ -73,6 +73,7 @@ class TreadmillViewModel(app: Application) : AndroidViewModel(app) {
     private val logLines = ArrayDeque<String>()
     private val timeFmt = SimpleDateFormat("HH:mm:ss", Locale.US)
     private fun log(line: String) {
+        android.util.Log.i("Treadmill", line)   // also in logcat: adb logcat -s Treadmill
         synchronized(logLines) {
             logLines.addLast("${timeFmt.format(Date())} $line")
             while (logLines.size > 40) logLines.removeFirst()

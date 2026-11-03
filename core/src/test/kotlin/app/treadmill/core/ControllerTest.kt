@@ -25,7 +25,27 @@ class ControllerTest {
         assertTrue(r.board.beltKph > 3.0)
         r.c.stop(); r.run(6.0)
         assertEquals(0.0, r.board.beltKph)
-        assertEquals(Mode.IDLE, r.board.mode, r.log.joinToString("\n"))
+        assertEquals(Mode.PAUSE, r.board.mode, r.log.joinToString("\n"))
+        // Regressions: v0.2 sent {Kph 0, Pause} and then Idle; the real board fails both.
+        assertEquals(0, r.board.rejectedFrames, r.log.joinToString("\n"))
+    }
+
+    @Test fun startAgainAfterStop() {
+        val r = Rig()
+        r.c.start(4.0); r.run(6.0)
+        r.c.stop(); r.run(6.0)
+        r.c.start(4.0); r.run(6.0)
+        assertEquals(Mode.RUNNING, r.board.mode, r.log.joinToString("\n"))
+        assertTrue(r.board.beltKph > 1.0)
+        assertEquals(0, r.board.rejectedFrames)
+    }
+
+    @Test fun pauseFromSpeedIsAcceptedFirstTime() {
+        val r = Rig()
+        r.c.start(4.83); r.run(10.0)
+        r.c.pause(); r.run(0.2)
+        assertEquals(Mode.PAUSE, r.board.mode, r.log.joinToString("\n"))
+        assertEquals(0, r.board.rejectedFrames)
     }
 
     @Test fun startAndStopSurviveRefusedFrames() {
@@ -62,6 +82,8 @@ class ControllerTest {
         r.c.start(4.0); r.run(6.0)
         assertFalse(r.c.snap.keyOut)
         assertEquals(Mode.RUNNING, r.board.mode)
+        // Regression: the safety net sent Pause while the key was out; the real board refuses that.
+        assertEquals(0, r.board.rejectedFrames, r.log.joinToString("\n"))
     }
 
     @Test fun pauseThenResume() {
@@ -91,7 +113,8 @@ class ControllerTest {
         r.run(8.0)
         assertTrue(maxBelt > 7.0)
         assertEquals(0.0, r.board.beltKph)
-        assertEquals(Mode.IDLE, r.board.mode)
+        assertEquals(Mode.PAUSE, r.board.mode)
+        assertEquals(0, r.board.rejectedFrames)
     }
 }
 
