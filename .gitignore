@@ -3,3 +3,8 @@ build/
 *.iml
 .idea/
 local.properties
+
+# Signing keys never go in the repo (see docs/SIGNING.md)
+*.keystore
+*.jks
+keystore.properties

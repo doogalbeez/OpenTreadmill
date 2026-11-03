@@ -1,4 +1,4 @@
-package app.treadmill.core
+package app.opentreadmill.core
 
 /** Calorie estimate from the ACSM walking and running equations. */
 object Stats {
@@ -28,6 +28,8 @@ class SessionStats(private val kg: () -> Double) {
     var meters = 0.0; private set
     var kcal = 0.0; private set
     var maxKph = 0.0; private set
+    /** Height climbed, from distance covered while the deck is inclined uphill. */
+    var climbM = 0.0; private set
 
     fun add(dtSeconds: Double, kph: Double, gradePct: Double) {
         if (kph <= 0.0) return
@@ -36,9 +38,14 @@ class SessionStats(private val kg: () -> Double) {
         maxKph = maxOf(maxKph, kph)
     }
 
-    fun addMeters(m: Double) { if (m > 0 && m < 50) meters += m }  // ignore odometer resets/jumps
+    /** Odometer distance; [gradePct] is the incline it was covered at. Ignores odometer resets and jumps. */
+    fun addMeters(m: Double, gradePct: Double = 0.0) {
+        if (m <= 0 || m >= 50) return
+        meters += m
+        if (gradePct > 0) climbM += m * gradePct / 100.0
+    }
 
     val avgKph get() = if (seconds > 0) meters / seconds * 3.6 else 0.0
 
-    fun reset() { seconds = 0.0; meters = 0.0; kcal = 0.0; maxKph = 0.0 }
+    fun reset() { seconds = 0.0; meters = 0.0; kcal = 0.0; maxKph = 0.0; climbM = 0.0 }
 }
