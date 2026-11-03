@@ -14,8 +14,9 @@ A factory reset puts the stock iFit software back, so nothing here is permanent.
 
 **Option A: from the console's browser (easiest)**
 1. In privileged mode, open Android **Settings → Security** and turn on **Unknown sources**.
-2. Open the browser, go to the latest successful run under the repo's **Actions** tab, and download
-   `treadmill-apk`. Or copy the APK onto a USB stick and open it with a file manager.
+2. Get `treadmill.apk` from the repo's **Releases** page. The repo is private, so either sign in to
+   GitHub in the console's browser, or download it on your computer or phone and copy it onto a
+   USB stick, then open it with the console's file manager.
 3. Open the APK and tap **Install**.
 
 **Option B: over ADB**

@@ -2,22 +2,35 @@ name: Build
 
 on:
   push:
+    branches: ["**"]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 17
       - uses: gradle/actions/setup-gradle@v4
       - name: Test core and build the APK
         run: ./gradlew :core:test :app:assembleDebug
+      - name: Name the APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk treadmill.apk
       - uses: actions/upload-artifact@v4
         with:
           name: treadmill-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: treadmill.apk
+      # Tagging vX.Y.Z publishes a release with a direct .apk download.
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" treadmill.apk --title "Treadmill $GITHUB_REF_NAME" --notes "Install treadmill.apk on the console. See docs/INSTALL.md."
