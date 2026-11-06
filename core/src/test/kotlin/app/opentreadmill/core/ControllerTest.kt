@@ -24,9 +24,9 @@ class SecurityTest {
     }
 
     @Test fun unlockFrameHasTheDocumentedLayout() {
-        val f = FitPro.verifySecurityRequest(ByteArray(32) { 7 }, masterLibraryVersion = 300)
+        val f = FitPro.verifySecurityRequest(ByteArray(32) { 7 }, masterLibraryVersion = 300, device = FitPro.DEVICE_TREADMILL)
         assertEquals(40, f.size)
-        assertEquals(FitPro.DEVICE_MAIN, f[0].toInt())
+        assertEquals(FitPro.DEVICE_TREADMILL, f[0].toInt())
         assertEquals(144, f[2].toInt() and 0xFF)
         assertEquals(listOf(0x60, 0x09, 0, 0), f.slice(35..38).map { it.toInt() and 0xFF })  // 2400, little-endian
     }
@@ -50,6 +50,11 @@ class SecurityTest {
         assertFalse(r.board.locked, r.log.joinToString("\n"))
         r.c.start(3.0); r.run(5.0)
         assertEquals(Mode.RUNNING, r.board.mode)
+    }
+
+    @Test fun boardThatAnswersIdentityOnTheMainDeviceIsUnlockedToo() {
+        val r = Rig(board = SimulatedBoard(startLocked = true, identityDevice = FitPro.DEVICE_MAIN))
+        assertFalse(r.board.locked, r.log.joinToString("\n"))
     }
 
     @Test fun boardThatRelocksMidSessionIsUnlockedAndStopStillWorks() {
@@ -80,7 +85,7 @@ class SecurityTest {
     @Test fun refusedUnlocksBackOff() {
         val r = Rig(board = SimulatedBoard(startLocked = true).apply { refuseUnlock = true })
         r.run(120.0)
-        // One at connect, 5 fast retries, then one every 30 s.
+        // 3 at connect, a few fast retries, then one every 30 s.
         assertTrue(r.board.unlockAttempts <= 10, "${r.board.unlockAttempts} attempts")
     }
 

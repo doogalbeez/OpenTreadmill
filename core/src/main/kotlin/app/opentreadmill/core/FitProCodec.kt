@@ -16,7 +16,7 @@ object FitPro {
 
     const val DEVICE_TREADMILL: Int = 4
     const val CMD_READ_WRITE_DATA: Int = 2
-    /** Identity and unlock go to the main board; treadmill fields go to [DEVICE_TREADMILL]. */
+    /** Some boards answer identity and unlock here instead of on [DEVICE_TREADMILL]. */
     const val DEVICE_MAIN: Int = 2
     const val CMD_DEVICE_INFO: Int = 129
     const val CMD_SYSTEM_INFO: Int = 130
@@ -130,10 +130,10 @@ object FitPro {
     }
 
     /** VerifySecurity: the hash, then 8 x the master library version as a little-endian int32. */
-    fun verifySecurityRequest(hash: ByteArray, masterLibraryVersion: Int): ByteArray {
+    fun verifySecurityRequest(hash: ByteArray, masterLibraryVersion: Int, device: Int): ByteArray {
         require(hash.size == 32) { "hash must be 32 bytes, was ${hash.size}" }
         val key = 8 * masterLibraryVersion
-        return frame(DEVICE_MAIN, CMD_VERIFY_SECURITY, hash + ByteArray(4) { i -> (key ushr (8 * i)).toByte() })
+        return frame(device, CMD_VERIFY_SECURITY, hash + ByteArray(4) { i -> (key ushr (8 * i)).toByte() })
     }
 
     /** The board's identity, read straight from it. These numbers unlock the board: never log them. */

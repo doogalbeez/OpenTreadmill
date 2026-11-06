@@ -89,13 +89,18 @@ class Controller(
     private var problem: String? = null
     private var lastUnlockAt: Long? = null
     private var unlockFailures = 0
+    private var unlockDevice = FitPro.DEVICE_TREADMILL
 
     val running get() = mode == Mode.RUNNING && wantRunning
 
     /** Read the machine's limits. Falls back to safe defaults for any the board won't give. */
     fun connect() {
         lastUnlockAt = clock()
-        unlock()
+        // The board can stay silent for a moment after a power cycle or a fresh connection.
+        for (attempt in 1..UNLOCK_CONNECT_TRIES) {
+            if (unlock()) break
+            if (attempt < UNLOCK_CONNECT_TRIES) Thread.sleep(UNLOCK_CONNECT_PAUSE_MS)
+        }
         fun one(f: Field): Double? = runCatching {
             val r = FitPro.decode(io.exchange(FitPro.readWriteRequest(reads = listOf(f))), listOf(f))
             if (r.ok) r.values.getValue(f) / 100.0 else null
@@ -170,19 +175,24 @@ class Controller(
 
     /** Asks the board who it is and answers its challenge. Logs the outcome, never the identity. */
     private fun unlock(): Boolean {
+        var step = "device info"
         val ok = try {
-            val id = FitPro.parseDeviceInfo(ask(FitPro.CMD_DEVICE_INFO)) ?: error("no device info")
+            val id = deviceInfo() ?: error("no reply from device 2 or 4")
+            log("board software ${id.softwareVersion}, on device $unlockDevice")
             if (id.softwareVersion < FitPro.SECURITY_MIN_SOFTWARE) {
                 log("board has no security to unlock")
                 unlockFailures = 0
                 return true
             }
-            val sys = FitPro.parseSystemInfo(ask(FitPro.CMD_SYSTEM_INFO, byteArrayOf(0, 0))) ?: error("no system info")
-            val library = FitPro.parseMasterLibraryVersion(ask(FitPro.CMD_VERSION_INFO, byteArrayOf(0, 0))) ?: error("no version info")
+            step = "system info"
+            val sys = FitPro.parseSystemInfo(ask(FitPro.CMD_SYSTEM_INFO, byteArrayOf(0, 0))) ?: error("bad reply")
+            step = "version info"
+            val library = FitPro.parseMasterLibraryVersion(ask(FitPro.CMD_VERSION_INFO, byteArrayOf(0, 0))) ?: error("bad reply")
+            step = "verify"
             val hash = FitPro.securityHash(id.serial, sys.partNumber, sys.model)
-            FitPro.isDone(io.exchange(FitPro.verifySecurityRequest(hash, library)))
+            FitPro.isDone(io.exchange(FitPro.verifySecurityRequest(hash, library, unlockDevice)))
         } catch (e: Exception) {
-            log("unlock: ${e.message}")
+            log("unlock, $step: ${e.message}")
             false
         }
         unlockFailures = if (ok) 0 else unlockFailures + 1
@@ -190,8 +200,20 @@ class Controller(
         return ok
     }
 
+    /**
+     * Finds which device answers identity commands. The Commercial 1750 here answers on the treadmill
+     * device; the strideApp notes use the main board. Remembered, so only the first try can time out.
+     */
+    private fun deviceInfo(): FitPro.Identity? {
+        for (device in listOf(unlockDevice, FitPro.DEVICE_TREADMILL, FitPro.DEVICE_MAIN).distinct()) {
+            val id = runCatching { FitPro.parseDeviceInfo(io.exchange(FitPro.frame(device, FitPro.CMD_DEVICE_INFO, ByteArray(0)))) }.getOrNull()
+            if (id != null) { unlockDevice = device; return id }
+        }
+        return null
+    }
+
     private fun ask(command: Int, content: ByteArray = ByteArray(0)) =
-        io.exchange(FitPro.frame(FitPro.DEVICE_MAIN, command, content))
+        io.exchange(FitPro.frame(unlockDevice, command, content))
 
     // ---- the loop -------------------------------------------------------------------
 
@@ -374,6 +396,8 @@ class Controller(
         const val UNLOCK_RETRY_MS = 2000L
         const val UNLOCK_SLOW_RETRY_MS = 30_000L
         const val UNLOCK_FAST_TRIES = 5
+        const val UNLOCK_CONNECT_TRIES = 3
+        const val UNLOCK_CONNECT_PAUSE_MS = 300L
         const val STOPPED_KPH = 0.3
         const val ODO_WINDOW_MS = 4000L
     }

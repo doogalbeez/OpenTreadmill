@@ -23,6 +23,8 @@ class SimulatedBoard(
     /** Locked boards are documented to refuse reads too; the console's board was seen answering them. */
     private val lockedRefusesReads: Boolean = true,
     private val softwareVersion: Int = 80,
+    /** The only device that answers identity commands; any other gets silence. The real board uses 4. */
+    private val identityDevice: Int = FitPro.DEVICE_TREADMILL,
 ) : FrameTransport {
     var mode = Mode.IDLE; private set
     var beltKph = 0.0; private set
@@ -92,13 +94,14 @@ class SimulatedBoard(
 
     private fun identityReply(request: ByteArray): ByteArray? {
         val cmd = request[2].toInt() and 0xFF
+        if (cmd != FitPro.CMD_READ_WRITE_DATA && request[0].toInt() != identityDevice) throw java.io.IOException("USB read timed out")
         val data = when (cmd) {
             FitPro.CMD_DEVICE_INFO -> byteArrayOf(softwareVersion.toByte(), 0) + le32(serial)
             FitPro.CMD_SYSTEM_INFO -> byteArrayOf(0, 0, 0) + le32(model) + le32(part)
             FitPro.CMD_VERSION_INFO -> byteArrayOf(library.toByte())
             FitPro.CMD_VERIFY_SECURITY -> {
                 unlockAttempts++
-                val want = FitPro.verifySecurityRequest(FitPro.securityHash(serial, part, model), library)
+                val want = FitPro.verifySecurityRequest(FitPro.securityHash(serial, part, model), library, identityDevice)
                 if (refuseUnlock || !request.copyOf(want.size).contentEquals(want)) return FitPro.frame(request[0].toInt(), cmd, byteArrayOf(4))
                 locked = false
                 byteArrayOf(1)
