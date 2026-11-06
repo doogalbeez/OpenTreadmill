@@ -18,7 +18,7 @@ Other Gen 6 NordicTrack/ProForm consoles with a FitPro board will probably work 
 - **Profiles:** each person has their own weight, units, colour theme, history and saved workouts
 - **Themes:** six colour schemes; STOP and safety warnings stay red in all of them
 - **Music:** play/pause/skip and volume for Spotify (or any music app) without leaving the workout
-- **Navigation:** floating Home / Back / Apps buttons over other apps, and an Apps list on the home screen
+- **Navigation:** a pop-out tab on the right edge with Home / Back / Apps over other apps, and an Apps list on the home screen
 - **Clock:** time zone and 12/24-hour setting
 - History with totals and CSV export; miles or kilometres
 - **Factory reset** in Settings (typed confirmation, then "Are you sure?") back to the stock iFit software
