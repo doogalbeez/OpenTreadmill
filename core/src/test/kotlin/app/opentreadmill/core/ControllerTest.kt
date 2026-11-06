@@ -4,9 +4,8 @@ import app.opentreadmill.core.FitPro.Mode
 import kotlin.test.*
 
 /** Runs a Controller against the quirky SimulatedBoard in fake time. */
-class Rig(reject: Int = 0, actual: Boolean = false) {
+class Rig(reject: Int = 0, actual: Boolean = false, val board: SimulatedBoard = SimulatedBoard(rejectEvery = reject, reportsActualKph = actual)) {
     var now = 1_000L
-    val board = SimulatedBoard(rejectEvery = reject, reportsActualKph = actual)
     val log = mutableListOf<String>()
     val c = Controller(board, clock = { now }, log = { log += it }).apply { connect() }
 
@@ -16,7 +15,131 @@ class Rig(reject: Int = 0, actual: Boolean = false) {
     }
 }
 
+class SecurityTest {
+    @Test fun hashMatchesTheDocumentedAlgorithm() {
+        val h = FitPro.securityHash(serial = 1, partNumber = 0x12345678, model = 100)
+        assertEquals(32, h.size)
+        assertEquals(0x35, h[0].toInt() and 0xFF)  // bit set: 1 xor low byte of the rotated part number
+        assertEquals(0xC8, h[1].toInt() and 0xFF)  // bit clear: 2 xor (2 * (1 + 100)) & 0xFF
+    }
+
+    @Test fun unlockFrameHasTheDocumentedLayout() {
+        val f = FitPro.verifySecurityRequest(ByteArray(32) { 7 }, masterLibraryVersion = 300, device = FitPro.DEVICE_TREADMILL)
+        assertEquals(40, f.size)
+        assertEquals(FitPro.DEVICE_TREADMILL, f[0].toInt())
+        assertEquals(144, f[2].toInt() and 0xFF)
+        assertEquals(listOf(0x60, 0x09, 0, 0), f.slice(35..38).map { it.toInt() and 0xFF })  // 2400, little-endian
+    }
+
+    @Test fun knownBadPartNumberIsCorrected() {
+        val part = 370357
+        val model = 39915
+        val data = byteArrayOf(2, 0, 0, 0) + ByteArray(4) { (model ushr (8 * it)).toByte() } + ByteArray(4) { (part ushr (8 * it)).toByte() }
+        assertEquals(374677, FitPro.parseSystemInfo(FitPro.frame(FitPro.DEVICE_MAIN, 130, data))!!.partNumber)
+    }
+
+    @Test fun garbledIdentityIsNeverUsed() {
+        val good = FitPro.frame(FitPro.DEVICE_MAIN, 129, byteArrayOf(2, 80, 0, 1, 2, 3, 4))
+        assertNotNull(FitPro.parseDeviceInfo(good))
+        assertNull(FitPro.parseDeviceInfo(good.copyOf().also { it[6] = 99 }))
+        assertNull(FitPro.parseDeviceInfo(FitPro.frame(FitPro.DEVICE_MAIN, 129, byteArrayOf(8, 80, 0, 1, 2, 3, 4))))
+    }
+
+    @Test fun boardLockedByAPowerCycleWorksFromTheFirstStart() {
+        val r = Rig(board = SimulatedBoard(startLocked = true))
+        assertFalse(r.board.locked, r.log.joinToString("\n"))
+        r.c.start(3.0); r.run(5.0)
+        assertEquals(Mode.RUNNING, r.board.mode)
+    }
+
+    @Test fun boardThatAnswersIdentityOnTheMainDeviceIsUnlockedToo() {
+        val r = Rig(board = SimulatedBoard(startLocked = true, identityDevice = FitPro.DEVICE_MAIN))
+        assertFalse(r.board.locked, r.log.joinToString("\n"))
+    }
+
+    @Test fun boardThatRelocksMidSessionIsUnlockedAndStopStillWorks() {
+        for (refusesReads in listOf(true, false)) {
+            val r = Rig(board = SimulatedBoard(lockedRefusesReads = refusesReads))
+            r.c.start(5.0); r.run(8.0)
+            r.board.locked = true
+            r.c.stop(); r.run(6.0)
+            assertFalse(r.board.locked)
+            assertEquals(0.0, r.board.beltKph, r.log.joinToString("\n"))
+            assertEquals(Mode.PAUSE, r.board.mode)
+        }
+    }
+
+    @Test fun lateUnlockNeverStartsTheBeltBySurprise() {
+        val r = Rig(board = SimulatedBoard(startLocked = true).apply { refuseUnlock = true })
+        r.c.start(3.0); r.run(20.0)
+        assertFalse(r.c.snap.wantRunning)
+        assertNotNull(r.c.snap.problem)
+        // The board finally accepts, long after the person pressed Start.
+        r.board.refuseUnlock = false
+        r.run(40.0)
+        assertFalse(r.board.locked, r.log.joinToString("\n"))
+        assertEquals(0.0, r.board.beltKph)
+        assertNotEquals(Mode.RUNNING, r.board.mode)
+    }
+
+    @Test fun refusedUnlocksBackOff() {
+        val r = Rig(board = SimulatedBoard(startLocked = true).apply { refuseUnlock = true })
+        r.run(120.0)
+        // 3 at connect, a few fast retries, then one every 30 s.
+        assertTrue(r.board.unlockAttempts <= 10, "${r.board.unlockAttempts} attempts")
+    }
+
+    @Test fun oldBoardWithoutSecurityIsLeftAlone() {
+        val r = Rig(board = SimulatedBoard(softwareVersion = 75))
+        assertEquals(0, r.board.unlockAttempts)
+        r.c.start(3.0); r.run(5.0)
+        assertEquals(Mode.RUNNING, r.board.mode)
+    }
+}
+
+class BoardWatchTest {
+    private fun check(connected: String?, present: String?, declined: String? = null, unresponsiveMs: Long = 0) =
+        BoardWatch.shouldReconnect(connected, present, declined, unresponsiveMs)
+
+    @Test fun boardThatAppearsAfterTheAppStartedIsPickedUp() {
+        assertTrue(check(connected = null, present = "/dev/bus/usb/001/002"))
+        assertFalse(check(connected = null, present = null))
+    }
+
+    @Test fun boardThatWasPowerCycledIsReopened() {
+        assertTrue(check(connected = "/dev/bus/usb/001/002", present = null))
+        assertTrue(check(connected = "/dev/bus/usb/001/002", present = "/dev/bus/usb/001/003"))
+        assertFalse(check(connected = "/dev/bus/usb/001/002", present = "/dev/bus/usb/001/002"))
+    }
+
+    @Test fun boardThatStopsAnsweringIsReopened() {
+        val board = "/dev/bus/usb/001/002"
+        assertFalse(check(board, board, unresponsiveMs = BoardWatch.UNRESPONSIVE_MS - 1))
+        assertTrue(check(board, board, unresponsiveMs = BoardWatch.UNRESPONSIVE_MS))
+    }
+
+    @Test fun declinedPermissionIsNotAskedAgainUntilTheBoardChanges() {
+        assertFalse(check(connected = null, present = "/dev/bus/usb/001/002", declined = "/dev/bus/usb/001/002"))
+        assertTrue(check(connected = null, present = "/dev/bus/usb/001/003", declined = "/dev/bus/usb/001/002"))
+    }
+}
+
 class ControllerTest {
+    @Test fun reconnectingAfterPowerLossNeverStartsTheBeltOnItsOwn() {
+        val before = Rig()
+        before.c.start(5.0); before.run(10.0)
+        assertTrue(before.board.beltKph > 3.0)
+        // Power comes back: a fresh board, and a fresh controller, as the app makes on reconnect.
+        val after = Rig()
+        after.run(5.0)
+        assertFalse(after.c.snap.wantRunning)
+        assertEquals(0.0, after.board.beltKph)
+        // Start then works as normal.
+        after.c.start(3.0); after.run(5.0)
+        assertEquals(Mode.RUNNING, after.board.mode)
+        assertTrue(after.board.beltKph > 1.0)
+    }
+
     @Test fun stopActuallyStopsTheBelt() {
         // Regression: v0.1 sent Idle, which a running board ignores, so STOP did nothing.
         val r = Rig()
@@ -61,6 +184,17 @@ class ControllerTest {
         assertEquals(0.0, r.board.beltKph)
         assertEquals(0.0, r.board.grade, 0.01, r.log.joinToString("\n"))
         assertEquals(Mode.PAUSE, r.board.mode)
+        assertEquals(0, r.board.rejectedFrames)
+    }
+
+    @Test fun consoleStopAlsoLevelsTheDeck() {
+        val r = Rig()
+        r.c.start(4.0); r.run(3.0)
+        r.board.consoleIncline(5.0); r.run(12.0)
+        r.board.consoleStop(); r.run(15.0)
+        assertFalse(r.c.snap.wantRunning)
+        assertEquals(0.0, r.board.beltKph)
+        assertEquals(0.0, r.board.grade, 0.01, r.log.joinToString("\n"))
         assertEquals(0, r.board.rejectedFrames)
     }
 

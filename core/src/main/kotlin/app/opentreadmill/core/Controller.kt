@@ -45,6 +45,11 @@ data class Snapshot(
  * - ActualKph may read 0 at every speed, so belt motion is judged from the odometer too.
  *
  * Safety net: whenever we don't want the belt running and it is moving, stop is re-sent.
+ *
+ * The board locks itself, across power cycles and idle days, and then answers with status
+ * SecurityBlock. That means "authenticate", so [connect] unlocks it and [tick] does so again
+ * whenever it asks. The refused write stays under the usual retry limit: a Start that couldn't be
+ * delivered in time is dropped, so a late unlock can never start the belt by surprise.
  */
 class Controller(
     private val io: FrameTransport,
@@ -82,11 +87,20 @@ class Controller(
     private var kphEchoed = false
     private var gradeEchoed = false
     private var problem: String? = null
+    private var lastUnlockAt: Long? = null
+    private var unlockFailures = 0
+    private var unlockDevice = FitPro.DEVICE_TREADMILL
 
     val running get() = mode == Mode.RUNNING && wantRunning
 
     /** Read the machine's limits. Falls back to safe defaults for any the board won't give. */
     fun connect() {
+        lastUnlockAt = clock()
+        // The board can stay silent for a moment after a power cycle or a fresh connection.
+        for (attempt in 1..UNLOCK_CONNECT_TRIES) {
+            if (unlock()) break
+            if (attempt < UNLOCK_CONNECT_TRIES) Thread.sleep(UNLOCK_CONNECT_PAUSE_MS)
+        }
         fun one(f: Field): Double? = runCatching {
             val r = FitPro.decode(io.exchange(FitPro.readWriteRequest(reads = listOf(f))), listOf(f))
             if (r.ok) r.values.getValue(f) / 100.0 else null
@@ -149,6 +163,58 @@ class Controller(
         log("stop")
     }
 
+    // ---- security -------------------------------------------------------------------
+
+    private fun unlockIfDue(now: Long) {
+        val wait = if (unlockFailures < UNLOCK_FAST_TRIES) UNLOCK_RETRY_MS else UNLOCK_SLOW_RETRY_MS
+        val last = lastUnlockAt
+        if (last != null && now - last < wait) return
+        lastUnlockAt = now
+        unlock()
+    }
+
+    /** Asks the board who it is and answers its challenge. Logs the outcome, never the identity. */
+    private fun unlock(): Boolean {
+        var step = "device info"
+        val ok = try {
+            val id = deviceInfo() ?: error("no reply from device 2 or 4")
+            log("board software ${id.softwareVersion}, on device $unlockDevice")
+            if (id.softwareVersion < FitPro.SECURITY_MIN_SOFTWARE) {
+                log("board has no security to unlock")
+                unlockFailures = 0
+                return true
+            }
+            step = "system info"
+            val sys = FitPro.parseSystemInfo(ask(FitPro.CMD_SYSTEM_INFO, byteArrayOf(0, 0))) ?: error("bad reply")
+            step = "version info"
+            val library = FitPro.parseMasterLibraryVersion(ask(FitPro.CMD_VERSION_INFO, byteArrayOf(0, 0))) ?: error("bad reply")
+            step = "verify"
+            val hash = FitPro.securityHash(id.serial, sys.partNumber, sys.model)
+            FitPro.isDone(io.exchange(FitPro.verifySecurityRequest(hash, library, unlockDevice)))
+        } catch (e: Exception) {
+            log("unlock, $step: ${e.message}")
+            false
+        }
+        unlockFailures = if (ok) 0 else unlockFailures + 1
+        log(if (ok) "board unlocked" else "unlock refused ($unlockFailures)")
+        return ok
+    }
+
+    /**
+     * Finds which device answers identity commands. The Commercial 1750 here answers on the treadmill
+     * device; the strideApp notes use the main board. Remembered, so only the first try can time out.
+     */
+    private fun deviceInfo(): FitPro.Identity? {
+        for (device in listOf(unlockDevice, FitPro.DEVICE_TREADMILL, FitPro.DEVICE_MAIN).distinct()) {
+            val id = runCatching { FitPro.parseDeviceInfo(io.exchange(FitPro.frame(device, FitPro.CMD_DEVICE_INFO, ByteArray(0)))) }.getOrNull()
+            if (id != null) { unlockDevice = device; return id }
+        }
+        return null
+    }
+
+    private fun ask(command: Int, content: ByteArray = ByteArray(0)) =
+        io.exchange(FitPro.frame(unlockDevice, command, content))
+
     // ---- the loop -------------------------------------------------------------------
 
     fun tick(): Snapshot {
@@ -174,6 +240,7 @@ class Controller(
         if (!reply.ok) {
             rejects++
             readOnlyNext = writes != null
+            if (reply.status == FitPro.STATUS_SECURITY_BLOCK) unlockIfDue(now)
             val why = FitPro.statusName(reply.status)
             if (rejects <= 5 || rejects % 50 == 0) log("refused ($why)" + (writes?.let { " write ${describe(it)}" } ?: ""))
             if (writes != null && ++tries > MAX_TRIES) {
@@ -266,11 +333,13 @@ class Controller(
      */
     private fun followConsole(now: Long, oldMode: Mode, boardKph: Double, boardGrade: Double) {
         val runQueued = queue.any { it == RUN_FRAME }
-        // Stop or pause pressed on the console.
+        // Stop pressed on the console: treated like STOP in the app, so the deck goes back down to 0% too.
         if (wantRunning && oldMode == Mode.RUNNING && mode in setOf(Mode.PAUSE, Mode.IDLE, Mode.RESULTS) && !runQueued) {
             log("stopped on the console")
             wantRunning = false; goalKph = 0.0; targetKph = 0.0
-            queue.removeAll { Field.KPH in it.keys }
+            queue.removeAll { Field.KPH in it.keys || Field.GRADE in it.keys }
+            targetGrade = 0.0.coerceIn(limits.minGrade, limits.maxGrade)
+            queue += mapOf(Field.GRADE to centi(targetGrade))
         }
         // Start pressed on the console. Not within 3 s of our own stop: then it is the board
         // ignoring us, and the safety net keeps stopping it.
@@ -324,6 +393,11 @@ class Controller(
         val RUN_FRAME = mapOf(Field.WORKOUT_MODE to Mode.RUNNING.code)
         val IDLE_FRAME = mapOf(Field.WORKOUT_MODE to Mode.IDLE.code)
         const val MAX_TRIES = 15
+        const val UNLOCK_RETRY_MS = 2000L
+        const val UNLOCK_SLOW_RETRY_MS = 30_000L
+        const val UNLOCK_FAST_TRIES = 5
+        const val UNLOCK_CONNECT_TRIES = 3
+        const val UNLOCK_CONNECT_PAUSE_MS = 300L
         const val STOPPED_KPH = 0.3
         const val ODO_WINDOW_MS = 4000L
     }

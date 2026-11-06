@@ -5,6 +5,7 @@ import android.content.Context
 import android.hardware.usb.UsbManager
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import app.opentreadmill.core.BoardWatch
 import app.opentreadmill.core.Controller
 import app.opentreadmill.core.FitPro
 import app.opentreadmill.core.FrameTransport
@@ -19,6 +20,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.Executors
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.asCoroutineDispatcher
 import kotlinx.coroutines.delay
@@ -213,6 +215,11 @@ class TreadmillViewModel(app: Application) : AndroidViewModel(app) {
     private var sessionStart = 0L
     private var resumeKph = 0.0
     private var lastOdo = -1
+    private val usb = app.getSystemService(Context.USB_SERVICE) as UsbManager
+    private var connecting = false
+    /** USB name of the board we have open; null while on the simulator. */
+    private var connectedBoard: String? = null
+    private var declinedBoard: String? = null
 
     private val logLines = ArrayDeque<String>()
     private val timeFmt = SimpleDateFormat("HH:mm:ss", Locale.US)
@@ -226,28 +233,48 @@ class TreadmillViewModel(app: Application) : AndroidViewModel(app) {
 
     init { connect() }
 
-    fun connect() = viewModelScope.launch {
-        pollJob?.cancel()
-        controller?.let { old -> withContext(io) { old.stop(); repeat(3) { runCatching { old.tick() } }; old.close() } }
-        controller = null; sim = null
-        _ui.value = _ui.value.copy(connection = "Connecting…", error = null)
-        val ctx = getApplication<Application>()
-        val usb = ctx.getSystemService(Context.USB_SERVICE) as UsbManager
-        val device = UsbHidTransport.findBoard(usb)
-        val transport: FrameTransport = try {
-            when {
-                device == null -> demo("Motor board not found, running the simulator")
-                !UsbHidTransport.ensurePermission(ctx, usb, device) -> demo("USB permission was declined, running the simulator")
-                else -> withContext(io) { UsbHidTransport.open(usb, device) }
+    /**
+     * Opens the board, or the simulator if there is none. Also called by the poll loop when the board
+     * comes or goes. The new Controller starts stopped, so reconnecting never moves the belt by itself.
+     */
+    fun connect() {
+        if (connecting) return
+        connecting = true
+        viewModelScope.launch {
+            try {
+                pollJob?.cancel()
+                controller?.let { old -> withContext(io) { old.stop(); repeat(3) { runCatching { old.tick() } }; old.close() } }
+                controller = null; sim = null; connectedBoard = null
+                // A running workout holds the old controller, and the belt lost power anyway.
+                if (sessionStart != 0L) finishSession()
+                lastOdo = -1
+                _ui.value = _ui.value.copy(connection = "Connecting…", error = null)
+                val ctx = getApplication<Application>()
+                val device = UsbHidTransport.findBoard(usb)
+                val transport: FrameTransport = try {
+                    when {
+                        device == null -> demo("Motor board not found, running the simulator")
+                        !UsbHidTransport.ensurePermission(ctx, usb, device) -> {
+                            declinedBoard = device.deviceName
+                            demo("USB permission was declined, running the simulator")
+                        }
+                        else -> withContext(io) { UsbHidTransport.open(usb, device) }.also { connectedBoard = device.deviceName }
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    demo(e.message ?: "Could not open the motor board")
+                }
+                val c = Controller(transport, log = ::log)
+                withContext(io) { c.connect() }
+                controller = c
+                _ui.value = _ui.value.copy(connection = if (sim != null) "Simulator" else "Connected", demo = sim != null, limits = c.limits)
+                log(if (sim != null) "using the simulator" else "connected to the motor board")
+                pollJob = pollLoop(c)
+            } finally {
+                connecting = false
             }
-        } catch (e: Exception) {
-            demo(e.message ?: "Could not open the motor board")
         }
-        val c = Controller(transport, log = ::log)
-        withContext(io) { c.connect() }
-        controller = c
-        _ui.value = _ui.value.copy(connection = if (sim != null) "Simulator" else "Connected", demo = sim != null, limits = c.limits)
-        pollJob = pollLoop(c)
     }
 
     private fun demo(reason: String): FrameTransport {
@@ -259,6 +286,8 @@ class TreadmillViewModel(app: Application) : AndroidViewModel(app) {
     private fun pollLoop(c: Controller) = viewModelScope.launch {
         var last = System.nanoTime()
         var workoutAcc = 0.0
+        var lastBoardCheck = System.currentTimeMillis()
+        var lastGoodReply = lastBoardCheck
         while (isActive) {
             val now = System.nanoTime()
             val dt = (now - last) / 1e9; last = now
@@ -303,6 +332,19 @@ class TreadmillViewModel(app: Application) : AndroidViewModel(app) {
                 workoutElapsed = r?.elapsed ?: 0,
                 log = synchronized(logLines) { logLines.toList().asReversed() },
             )
+
+            // The board was switched off, came back, or turned up after the app started: open it again.
+            val clock = System.currentTimeMillis()
+            if (s.boardOk) lastGoodReply = clock
+            if (clock - lastBoardCheck >= BoardWatch.CHECK_EVERY_MS) {
+                lastBoardCheck = clock
+                val present = UsbHidTransport.findBoard(usb)?.deviceName
+                if (BoardWatch.shouldReconnect(connectedBoard, present, declinedBoard, clock - lastGoodReply)) {
+                    log("board link changed (was ${connectedBoard ?: "simulator"}, now ${present ?: "none"}), reconnecting")
+                    connect()
+                    return@launch
+                }
+            }
             delay(200)
         }
     }
