@@ -266,11 +266,13 @@ class Controller(
      */
     private fun followConsole(now: Long, oldMode: Mode, boardKph: Double, boardGrade: Double) {
         val runQueued = queue.any { it == RUN_FRAME }
-        // Stop or pause pressed on the console.
+        // Stop pressed on the console: treated like STOP in the app, so the deck goes back down to 0% too.
         if (wantRunning && oldMode == Mode.RUNNING && mode in setOf(Mode.PAUSE, Mode.IDLE, Mode.RESULTS) && !runQueued) {
             log("stopped on the console")
             wantRunning = false; goalKph = 0.0; targetKph = 0.0
-            queue.removeAll { Field.KPH in it.keys }
+            queue.removeAll { Field.KPH in it.keys || Field.GRADE in it.keys }
+            targetGrade = 0.0.coerceIn(limits.minGrade, limits.maxGrade)
+            queue += mapOf(Field.GRADE to centi(targetGrade))
         }
         // Start pressed on the console. Not within 3 s of our own stop: then it is the board
         // ignoring us, and the safety net keeps stopping it.
