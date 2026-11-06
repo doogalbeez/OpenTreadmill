@@ -45,6 +45,11 @@ data class Snapshot(
  * - ActualKph may read 0 at every speed, so belt motion is judged from the odometer too.
  *
  * Safety net: whenever we don't want the belt running and it is moving, stop is re-sent.
+ *
+ * The board locks itself, across power cycles and idle days, and then answers with status
+ * SecurityBlock. That means "authenticate", so [connect] unlocks it and [tick] does so again
+ * whenever it asks. The refused write stays under the usual retry limit: a Start that couldn't be
+ * delivered in time is dropped, so a late unlock can never start the belt by surprise.
  */
 class Controller(
     private val io: FrameTransport,
@@ -82,11 +87,15 @@ class Controller(
     private var kphEchoed = false
     private var gradeEchoed = false
     private var problem: String? = null
+    private var lastUnlockAt: Long? = null
+    private var unlockFailures = 0
 
     val running get() = mode == Mode.RUNNING && wantRunning
 
     /** Read the machine's limits. Falls back to safe defaults for any the board won't give. */
     fun connect() {
+        lastUnlockAt = clock()
+        unlock()
         fun one(f: Field): Double? = runCatching {
             val r = FitPro.decode(io.exchange(FitPro.readWriteRequest(reads = listOf(f))), listOf(f))
             if (r.ok) r.values.getValue(f) / 100.0 else null
@@ -149,6 +158,41 @@ class Controller(
         log("stop")
     }
 
+    // ---- security -------------------------------------------------------------------
+
+    private fun unlockIfDue(now: Long) {
+        val wait = if (unlockFailures < UNLOCK_FAST_TRIES) UNLOCK_RETRY_MS else UNLOCK_SLOW_RETRY_MS
+        val last = lastUnlockAt
+        if (last != null && now - last < wait) return
+        lastUnlockAt = now
+        unlock()
+    }
+
+    /** Asks the board who it is and answers its challenge. Logs the outcome, never the identity. */
+    private fun unlock(): Boolean {
+        val ok = try {
+            val id = FitPro.parseDeviceInfo(ask(FitPro.CMD_DEVICE_INFO)) ?: error("no device info")
+            if (id.softwareVersion < FitPro.SECURITY_MIN_SOFTWARE) {
+                log("board has no security to unlock")
+                unlockFailures = 0
+                return true
+            }
+            val sys = FitPro.parseSystemInfo(ask(FitPro.CMD_SYSTEM_INFO, byteArrayOf(0, 0))) ?: error("no system info")
+            val library = FitPro.parseMasterLibraryVersion(ask(FitPro.CMD_VERSION_INFO, byteArrayOf(0, 0))) ?: error("no version info")
+            val hash = FitPro.securityHash(id.serial, sys.partNumber, sys.model)
+            FitPro.isDone(io.exchange(FitPro.verifySecurityRequest(hash, library)))
+        } catch (e: Exception) {
+            log("unlock: ${e.message}")
+            false
+        }
+        unlockFailures = if (ok) 0 else unlockFailures + 1
+        log(if (ok) "board unlocked" else "unlock refused ($unlockFailures)")
+        return ok
+    }
+
+    private fun ask(command: Int, content: ByteArray = ByteArray(0)) =
+        io.exchange(FitPro.frame(FitPro.DEVICE_MAIN, command, content))
+
     // ---- the loop -------------------------------------------------------------------
 
     fun tick(): Snapshot {
@@ -174,6 +218,7 @@ class Controller(
         if (!reply.ok) {
             rejects++
             readOnlyNext = writes != null
+            if (reply.status == FitPro.STATUS_SECURITY_BLOCK) unlockIfDue(now)
             val why = FitPro.statusName(reply.status)
             if (rejects <= 5 || rejects % 50 == 0) log("refused ($why)" + (writes?.let { " write ${describe(it)}" } ?: ""))
             if (writes != null && ++tries > MAX_TRIES) {
@@ -326,6 +371,9 @@ class Controller(
         val RUN_FRAME = mapOf(Field.WORKOUT_MODE to Mode.RUNNING.code)
         val IDLE_FRAME = mapOf(Field.WORKOUT_MODE to Mode.IDLE.code)
         const val MAX_TRIES = 15
+        const val UNLOCK_RETRY_MS = 2000L
+        const val UNLOCK_SLOW_RETRY_MS = 30_000L
+        const val UNLOCK_FAST_TRIES = 5
         const val STOPPED_KPH = 0.3
         const val ODO_WINDOW_MS = 4000L
     }

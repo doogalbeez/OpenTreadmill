@@ -18,6 +18,11 @@ class SimulatedBoard(
     var rejectEvery: Int = 0,
     private val accelKphPerSec: Double = 1.5,
     private val gradePerSec: Double = 0.5,
+    /** A board that has re-locked itself, as it does across a power cycle. */
+    startLocked: Boolean = false,
+    /** Locked boards are documented to refuse reads too; the console's board was seen answering them. */
+    private val lockedRefusesReads: Boolean = true,
+    private val softwareVersion: Int = 80,
 ) : FrameTransport {
     var mode = Mode.IDLE; private set
     var beltKph = 0.0; private set
@@ -33,6 +38,14 @@ class SimulatedBoard(
     var rejectedFrames = 0; private set
     /** Test hook: a board that won't start at all. */
     var refuseRunning = false
+    var locked = startLocked
+    /** Test hook: a board that won't accept any unlock. */
+    var refuseUnlock = false
+    var unlockAttempts = 0; private set
+    private val serial = 0x0BADF00D
+    private val model = 41234
+    private val part = 370001
+    private val library = 3
 
     // The console's own buttons, which talk to the board without going through the app.
     fun consoleSpeed(kph: Double) { if (mode == Mode.RUNNING) targetKph = kph.coerceIn(minKph, maxKph) }
@@ -52,8 +65,10 @@ class SimulatedBoard(
     }
 
     override fun exchange(request: ByteArray): ByteArray {
+        identityReply(request)?.let { return it }
         frames++
         val (writes, reads) = FitPro.parseRequest(request)
+        if (locked && (lockedRefusesReads || writes.isNotEmpty())) return FitPro.response(request[0].toInt(), FitPro.STATUS_SECURITY_BLOCK, emptyList())
         if (rejectEvery > 0 && frames % rejectEvery == 0) return FitPro.response(request[0].toInt(), 4, reads.map { it to 0 })
         // Like the real board: a Kph outside its limits (Kph 0 included) fails the whole frame.
         writes[Field.KPH]?.let { if (it / 100.0 !in minKph..maxKph) { rejectedFrames++; return FitPro.response(request[0].toInt(), 4, reads.map { r -> r to 0 }) } }
@@ -71,6 +86,26 @@ class SimulatedBoard(
         // Dmk shows up in bursts, then the board reports Pause while the key is still out.
         if (mode == Mode.SAFETY_KEY_OUT && --dmkBurst <= 0) mode = Mode.PAUSE
         return FitPro.response(request[0].toInt(), FitPro.STATUS_DONE, values)
+    }
+
+    private fun le32(v: Int) = ByteArray(4) { i -> (v ushr (8 * i)).toByte() }
+
+    private fun identityReply(request: ByteArray): ByteArray? {
+        val cmd = request[2].toInt() and 0xFF
+        val data = when (cmd) {
+            FitPro.CMD_DEVICE_INFO -> byteArrayOf(softwareVersion.toByte(), 0) + le32(serial)
+            FitPro.CMD_SYSTEM_INFO -> byteArrayOf(0, 0, 0) + le32(model) + le32(part)
+            FitPro.CMD_VERSION_INFO -> byteArrayOf(library.toByte())
+            FitPro.CMD_VERIFY_SECURITY -> {
+                unlockAttempts++
+                val want = FitPro.verifySecurityRequest(FitPro.securityHash(serial, part, model), library)
+                if (refuseUnlock || !request.copyOf(want.size).contentEquals(want)) return FitPro.frame(request[0].toInt(), cmd, byteArrayOf(4))
+                locked = false
+                byteArrayOf(1)
+            }
+            else -> return null
+        }
+        return FitPro.frame(request[0].toInt(), cmd, byteArrayOf(FitPro.STATUS_DONE.toByte()) + data)
     }
 
     private fun applyMode(m: Mode) {

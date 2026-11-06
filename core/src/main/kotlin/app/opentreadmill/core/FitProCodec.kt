@@ -16,6 +16,14 @@ object FitPro {
 
     const val DEVICE_TREADMILL: Int = 4
     const val CMD_READ_WRITE_DATA: Int = 2
+    /** Identity and unlock go to the main board; treadmill fields go to [DEVICE_TREADMILL]. */
+    const val DEVICE_MAIN: Int = 2
+    const val CMD_DEVICE_INFO: Int = 129
+    const val CMD_SYSTEM_INFO: Int = 130
+    const val CMD_VERSION_INFO: Int = 132
+    const val CMD_VERIFY_SECURITY: Int = 144
+    /** Below this software version the board has no security and no VerifySecurity. */
+    const val SECURITY_MIN_SOFTWARE: Int = 76
 
     /** Commands that can reset or brick the board. The codec refuses to build them. */
     val FORBIDDEN_COMMANDS = setOf(9, 56)
@@ -108,6 +116,54 @@ object FitPro {
         out[len - 1] = checksum(out, len - 1)
         return out
     }
+
+    /** The 32-byte VerifySecurity hash, from numbers the board reports. All arithmetic truncates to a byte. */
+    fun securityHash(serial: Int, partNumber: Int, model: Int): ByteArray = ByteArray(32) { b ->
+        var v = (b + 1) and 0xFF
+        if ((serial ushr b) and 1 == 1) {
+            val p = if (b < 16) ((partNumber shl 16) or (partNumber ushr 16)) ushr b else partNumber ushr b
+            v = v xor (p and 0xFF)
+        } else {
+            v = v xor ((v * (b + model)) and 0xFF)
+        }
+        v.toByte()
+    }
+
+    /** VerifySecurity: the hash, then 8 x the master library version as a little-endian int32. */
+    fun verifySecurityRequest(hash: ByteArray, masterLibraryVersion: Int): ByteArray {
+        require(hash.size == 32) { "hash must be 32 bytes, was ${hash.size}" }
+        val key = 8 * masterLibraryVersion
+        return frame(DEVICE_MAIN, CMD_VERIFY_SECURITY, hash + ByteArray(4) { i -> (key ushr (8 * i)).toByte() })
+    }
+
+    /** The board's identity, read straight from it. These numbers unlock the board: never log them. */
+    class Identity(val softwareVersion: Int, val serial: Int)
+    class SystemIdentity(val model: Int, val partNumber: Int)
+
+    /** The frame if it is intact, status Done and holds [need] bytes of data; else null, never a guess. */
+    private fun done(bytes: ByteArray?, need: Int): ByteArray? {
+        if (bytes == null || bytes.size < 5) return null
+        val len = bytes[1].toInt() and 0xFF
+        if (len < 5 || len > bytes.size || checksum(bytes, len - 1) != bytes[len - 1]) return null
+        if (bytes[3].toInt() and 0xFF != STATUS_DONE || len < 4 + need + 1) return null
+        return bytes
+    }
+
+    private fun u32(b: ByteArray, at: Int) = (0 until 4).fold(0) { acc, i -> acc or ((b[at + i].toInt() and 0xFF) shl (8 * i)) }
+
+    fun parseDeviceInfo(bytes: ByteArray?): Identity? =
+        done(bytes, 6)?.let { Identity(it[4].toInt() and 0xFF, u32(it, 6)) }
+
+    fun parseSystemInfo(bytes: ByteArray?): SystemIdentity? = done(bytes, 11)?.let {
+        val model = u32(it, 7)
+        val part = u32(it, 11)
+        // One production run reports a part number that does not match its own hash.
+        SystemIdentity(model, if (part == 370357 && model == 39915) 374677 else part)
+    }
+
+    fun parseMasterLibraryVersion(bytes: ByteArray?): Int? = done(bytes, 1)?.let { it[4].toInt() and 0xFF }
+
+    fun isDone(bytes: ByteArray?): Boolean = done(bytes, 0) != null
 
     class Response(val device: Int, val command: Int, val status: Int, val values: Map<Field, Int>) {
         val ok get() = status == STATUS_DONE
