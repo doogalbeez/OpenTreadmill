@@ -16,7 +16,49 @@ class Rig(reject: Int = 0, actual: Boolean = false) {
     }
 }
 
+class BoardWatchTest {
+    private fun check(connected: String?, present: String?, declined: String? = null, unresponsiveMs: Long = 0) =
+        BoardWatch.shouldReconnect(connected, present, declined, unresponsiveMs)
+
+    @Test fun boardThatAppearsAfterTheAppStartedIsPickedUp() {
+        assertTrue(check(connected = null, present = "/dev/bus/usb/001/002"))
+        assertFalse(check(connected = null, present = null))
+    }
+
+    @Test fun boardThatWasPowerCycledIsReopened() {
+        assertTrue(check(connected = "/dev/bus/usb/001/002", present = null))
+        assertTrue(check(connected = "/dev/bus/usb/001/002", present = "/dev/bus/usb/001/003"))
+        assertFalse(check(connected = "/dev/bus/usb/001/002", present = "/dev/bus/usb/001/002"))
+    }
+
+    @Test fun boardThatStopsAnsweringIsReopened() {
+        val board = "/dev/bus/usb/001/002"
+        assertFalse(check(board, board, unresponsiveMs = BoardWatch.UNRESPONSIVE_MS - 1))
+        assertTrue(check(board, board, unresponsiveMs = BoardWatch.UNRESPONSIVE_MS))
+    }
+
+    @Test fun declinedPermissionIsNotAskedAgainUntilTheBoardChanges() {
+        assertFalse(check(connected = null, present = "/dev/bus/usb/001/002", declined = "/dev/bus/usb/001/002"))
+        assertTrue(check(connected = null, present = "/dev/bus/usb/001/003", declined = "/dev/bus/usb/001/002"))
+    }
+}
+
 class ControllerTest {
+    @Test fun reconnectingAfterPowerLossNeverStartsTheBeltOnItsOwn() {
+        val before = Rig()
+        before.c.start(5.0); before.run(10.0)
+        assertTrue(before.board.beltKph > 3.0)
+        // Power comes back: a fresh board, and a fresh controller, as the app makes on reconnect.
+        val after = Rig()
+        after.run(5.0)
+        assertFalse(after.c.snap.wantRunning)
+        assertEquals(0.0, after.board.beltKph)
+        // Start then works as normal.
+        after.c.start(3.0); after.run(5.0)
+        assertEquals(Mode.RUNNING, after.board.mode)
+        assertTrue(after.board.beltKph > 1.0)
+    }
+
     @Test fun stopActuallyStopsTheBelt() {
         // Regression: v0.1 sent Idle, which a running board ignores, so STOP did nothing.
         val r = Rig()
@@ -61,6 +103,17 @@ class ControllerTest {
         assertEquals(0.0, r.board.beltKph)
         assertEquals(0.0, r.board.grade, 0.01, r.log.joinToString("\n"))
         assertEquals(Mode.PAUSE, r.board.mode)
+        assertEquals(0, r.board.rejectedFrames)
+    }
+
+    @Test fun consoleStopAlsoLevelsTheDeck() {
+        val r = Rig()
+        r.c.start(4.0); r.run(3.0)
+        r.board.consoleIncline(5.0); r.run(12.0)
+        r.board.consoleStop(); r.run(15.0)
+        assertFalse(r.c.snap.wantRunning)
+        assertEquals(0.0, r.board.beltKph)
+        assertEquals(0.0, r.board.grade, 0.01, r.log.joinToString("\n"))
         assertEquals(0, r.board.rejectedFrames)
     }
 
